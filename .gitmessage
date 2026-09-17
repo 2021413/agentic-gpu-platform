@@ -1,0 +1,4 @@
+# <type>(<scope>): <subject>          -- Conventional Commits 1.0.0
+#
+# type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore
+# scope: domain | application | infrastructure | api | worker | bootstrap | docs | ci
