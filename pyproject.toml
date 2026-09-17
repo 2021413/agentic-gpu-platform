@@ -1,0 +1,112 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-gpu-platform"
+version = "0.1.0"
+description = "Horizontally scalable agentic coding platform orchestrating GPU inference workers"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "redis>=5.2",
+    "httpx>=0.28",
+    "structlog>=24.4",
+    "prometheus-client>=0.21",
+    "sse-starlette>=2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "testcontainers[postgres,redis]>=4.8",
+    "pre-commit>=4.0",
+    "types-redis>=4.6",
+]
+telemetry = [
+    "opentelemetry-api>=1.28",
+    "opentelemetry-sdk>=1.28",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+]
+
+[project.scripts]
+agentic-api = "bootstrap.app:main"
+agentic-worker = "worker_agent.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/domain", "src/application", "src/infrastructure", "src/interfaces", "src/bootstrap", "src/worker_agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle / pyflakes
+    "I",                # isort
+    "N",                # pep8-naming
+    "UP",               # pyupgrade
+    "B",                # bugbear
+    "A",                # builtins shadowing
+    "C4",               # comprehensions
+    "SIM",              # simplify
+    "TID",              # tidy imports
+    "RUF",
+    "ASYNC",
+    "PL",
+]
+ignore = [
+    "PLR0913",  # many arguments: constructor injection is deliberate here
+    "PLR2004",  # magic values in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["domain", "application", "infrastructure", "interfaces", "bootstrap", "worker_agent"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Enforce the dependency rule: the domain never imports infrastructure or frameworks.
+# (Structural enforcement lives in tests/architecture/test_dependency_rule.py.)
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["domain", "application", "infrastructure", "interfaces", "bootstrap", "worker_agent"]
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*", "sse_starlette.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "integration: requires PostgreSQL and Redis (docker)",
+    "e2e: full stack end-to-end scenario",
+]
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
