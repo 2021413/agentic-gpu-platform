@@ -40,6 +40,9 @@ pathlib.Path('/tmp/requirements.txt').write_text('\n'.join(pyproject['project'][
 
 # Then the project itself (console scripts agentic-api / agentic-worker).
 COPY src ./src
+# Prompt templates are runtime data the wheel force-includes: without them the
+# build fails, and an image that skipped them would ship agents that cannot speak.
+COPY prompts ./prompts
 RUN pip install --no-cache-dir --no-deps .
 
 # --- runtime stage ---------------------------------------------------------

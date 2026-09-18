@@ -14,6 +14,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncEngine
+
 from application.orchestration.agents import (
     CoderAgent,
     PlannerAgent,
@@ -91,6 +93,8 @@ class Container:
     """Everything the processes need, already wired."""
 
     settings: Settings
+    engine: AsyncEngine
+    redis: Any | None
     clock: SystemClock
     ids: UuidGenerator
     uow_factory: UnitOfWorkFactory
@@ -182,6 +186,7 @@ async def build_container(
     def uow_factory() -> SqlAlchemyUnitOfWork:
         return SqlAlchemyUnitOfWork(session_factory)
 
+    redis: Any | None = None
     if in_memory_messaging:
         registry: WorkerRegistry = InMemoryWorkerRegistry()
         queue: JobQueue = InMemoryJobQueue()
@@ -190,8 +195,7 @@ async def build_container(
         redis = create_redis_client(settings.redis_url)
         # aclose() is the supported shutdown in redis>=5; close() is deprecated
         # and would raise under the project's error-on-DeprecationWarning policy.
-        # The ignore is for the stale types-redis stubs, not for the runtime.
-        closers.append(redis.aclose)  # type: ignore[attr-defined]
+        closers.append(redis.aclose)
         registry = RedisWorkerRegistry(redis)
         queue = RedisJobQueue(redis)
         bus = RedisEventBus(redis)
@@ -260,6 +264,8 @@ async def build_container(
 
     return Container(
         settings=settings,
+        engine=engine,
+        redis=redis,
         clock=clock,
         ids=ids,
         uow_factory=uow_factory,
