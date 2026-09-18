@@ -20,6 +20,10 @@ FORBIDDEN: dict[str, tuple[str, ...]] = {
     "domain": ("application", "infrastructure", "interfaces", "bootstrap", "worker_agent"),
     "application": ("infrastructure", "interfaces", "bootstrap", "worker_agent"),
     "infrastructure": ("interfaces", "bootstrap"),
+    # The HTTP layer translates requests into use cases. Reaching an adapter
+    # directly would put a driver behind a route handler, which is precisely the
+    # architecture the spec rejects.
+    "interfaces": ("infrastructure", "bootstrap"),
 }
 
 # Frameworks and drivers that must never reach the inner layers.
@@ -36,6 +40,7 @@ FORBIDDEN_THIRD_PARTY: dict[str, tuple[str, ...]] = {
         "prometheus_client",
     ),
     "application": ("fastapi", "starlette", "sqlalchemy", "alembic", "redis", "uvicorn"),
+    "interfaces": ("sqlalchemy", "alembic", "redis", "httpx"),
 }
 
 
