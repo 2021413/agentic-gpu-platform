@@ -73,6 +73,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The default run is the one the README promises: no GPU, no network, no
+# container. Everything else is opted into by name, because a suite that
+# quietly downloads from the hub is a suite nobody can run on a plane.
+addopts = "-m 'not integration and not gpu and not runpod'"
 pythonpath = ["src", "tools", "."]
 markers = [
     "integration: needs a running vLLM or a container runtime",

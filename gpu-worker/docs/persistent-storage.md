@@ -15,7 +15,7 @@ RunPod network volume mounted at `/runpod-volume`.
   vllm/                 VLLM_CACHE_ROOT — compiled graphs and kernels
     triton/             TRITON_CACHE_DIR
   torch/                TORCH_HOME
-  tmp/                  TMPDIR — partial downloads land here, not in the container
+  tmp/                  TMPDIR — scratch space, kept off the container disk
   xdg/                  XDG_CACHE_HOME
   state/
     model-ready.json    the readiness marker
@@ -43,7 +43,7 @@ first time anything else needs room.
 | What | Size |
 |---|---|
 | Model weights, one revision | 31.2 GB |
-| Peak extra while a download resumes (one shard in flight) | ~10 GB |
+| Peak extra while resuming (partial blobs in `hub/blobs/*.incomplete`) | ~10 GB |
 | vLLM / Triton compiled cache | 1–5 GB |
 | Temporary files | 1–2 GB |
 | **Single revision, comfortable** | **~50 GB** |

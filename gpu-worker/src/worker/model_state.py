@@ -23,10 +23,11 @@ import os
 import shutil
 import socket
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,17 @@ __all__ = [
     "write_marker",
 ]
 
-MARKER_VERSION = 1
+MARKER_VERSION = 2
+
+# Weights and configuration only. Fetching every file would also pull the
+# duplicate .pt/.gguf variants some repositories carry.
+ALLOW_PATTERNS: tuple[str, ...] = (
+    "*.safetensors",
+    "*.json",
+    "*.txt",
+    "*.model",
+    "*.jinja",
+)
 
 
 class ModelPreparationError(RuntimeError):
@@ -268,6 +279,94 @@ def snapshot_files(snapshot: Path) -> dict[str, int]:
     return result
 
 
+def _wanted(name: str) -> bool:
+    """Whether a repository file is one this worker actually downloads."""
+    return any(fnmatch(name, pattern) for pattern in ALLOW_PATTERNS)
+
+
+def hub_file_sizes(config: WorkerConfig, *, log: Callable[[str], None]) -> dict[str, int] | None:
+    """The sizes the hub reports for this revision, or ``None`` if unreachable.
+
+    This is the only *external* source of truth available. Without it, checking
+    a snapshot against sizes measured from that same snapshot proves nothing —
+    a truncated shard simply gets recorded as the correct length.
+    """
+    try:
+        from huggingface_hub import HfApi  # noqa: PLC0415 - reads HF_HOME at import
+
+        info = HfApi().model_info(
+            config.model_id,
+            revision=config.model_revision,
+            files_metadata=True,
+            token=config.hf_token.reveal() or None,
+        )
+    except Exception as exc:
+        log(f"could not read file metadata from the hub ({type(exc).__name__}: {exc})")
+        return None
+
+    sizes: dict[str, int] = {}
+    for sibling in info.siblings or []:
+        size = getattr(sibling, "size", None)
+        if size and _wanted(sibling.rfilename):
+            sizes[sibling.rfilename] = int(size)
+    return sizes or None
+
+
+def authoritative_sizes(
+    config: WorkerConfig, *, previous: ModelState | None, log: Callable[[str], None]
+) -> dict[str, int] | None:
+    """Expected file sizes, from outside the snapshot being verified.
+
+    Preference order: the hub, then the sizes recorded by an earlier preparation
+    that was itself verified. A marker written without an authoritative source
+    is not trusted as one.
+    """
+    sizes = hub_file_sizes(config, log=log)
+    if sizes:
+        return sizes
+    if previous is not None and previous.verified and previous.files:
+        log(
+            "hub unreachable; verifying against the sizes recorded by the last verified preparation"
+        )
+        return dict(previous.files)
+    return None
+
+
+def _mismatches(snapshot: Path, expected: Mapping[str, int]) -> list[str]:
+    """Files that are absent or the wrong length, by name."""
+    broken: list[str] = []
+    for name, size in expected.items():
+        candidate = snapshot / name
+        try:
+            actual = candidate.stat().st_size
+        except OSError:
+            broken.append(name)
+            continue
+        if actual != size:
+            broken.append(name)
+    return broken
+
+
+def _discard(snapshot: Path, names: Sequence[str], *, log: Callable[[str], None]) -> None:
+    """Remove exactly the corrupt files so the hub client fetches them again.
+
+    Narrow and loud by design. The rule elsewhere is that a cached model is
+    never deleted automatically; this is the one exception, and it applies only
+    to files proven to differ from what the hub says they are — leaving them in
+    place would mean serving corrupt weights forever, since the hub client skips
+    any file that already exists.
+    """
+    for name in names:
+        link = snapshot / name
+        blob = link.resolve() if link.is_symlink() else link
+        for path in {link, blob}:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                log(f"could not remove {path}: {exc}")
+        log(f"discarded corrupt file so it can be fetched again: {name}")
+
+
 # ----------------------------------------------------------------------
 # preparation
 # ----------------------------------------------------------------------
@@ -288,10 +387,14 @@ class PreparationOutcome:
 Downloader = Callable[..., str]
 
 
+SizesProvider = Callable[[WorkerConfig, "ModelState | None"], Mapping[str, int] | None]
+
+
 def prepare_model(
     config: WorkerConfig,
     *,
     downloader: Downloader | None = None,
+    sizes: SizesProvider | None = None,
     log: Callable[[str], None] = print,
     now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -304,6 +407,7 @@ def prepare_model(
     layout = config.layout
     started = now()
 
+    previous = read_marker(layout)
     existing = _already_prepared(config, log=log)
     if existing is not None:
         return PreparationOutcome(existing, downloaded=False, attempts=0, duration_seconds=0.0)
@@ -325,19 +429,35 @@ def prepare_model(
             )
 
         _require_free_space(config, log=log)
+        # Injectable so a unit test can state the truth instead of reaching the
+        # hub; the default is the only real source of truth there is.
+        provider: SizesProvider = sizes or (
+            lambda cfg, prev: authoritative_sizes(cfg, previous=prev, log=log)
+        )
+        expected = provider(config, previous)
         snapshot, attempts = _download_with_retries(
             config, downloader=downloader, log=log, now=now, sleep=sleep
+        )
+        snapshot, attempts, verified = _repair_until_correct(
+            config,
+            snapshot=snapshot,
+            expected=expected,
+            attempts=attempts,
+            downloader=downloader,
+            log=log,
+            now=now,
+            sleep=sleep,
         )
         files = snapshot_files(snapshot)
         total = sum(files.values())
         state = ModelState(
             model_id=config.model_id,
-            revision=config.model_revision or _resolved_revision(snapshot),
+            revision=_resolved_revision(snapshot),
             snapshot_path=str(snapshot),
             prepared_at=_now(),
             total_bytes=total,
             files=files,
-            verified=True,
+            verified=verified,
             vllm_image=os.environ.get("VLLM_IMAGE_TAG"),
         )
         write_marker(layout, state)
@@ -350,6 +470,59 @@ def prepare_model(
         )
 
 
+def _repair_until_correct(
+    config: WorkerConfig,
+    *,
+    snapshot: Path,
+    expected: Mapping[str, int] | None,
+    attempts: int,
+    downloader: Downloader | None,
+    log: Callable[[str], None],
+    now: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> tuple[Path, int, bool]:
+    """Check the snapshot against an external truth, and repair what differs.
+
+    The hub client skips any file that already exists, so a blob truncated by a
+    killed download is never re-fetched on its own. Without this step the
+    truncated length would simply be recorded as correct, the marker would claim
+    the model was verified, and every later boot would agree — while vLLM loaded
+    corrupt weights.
+    """
+    if expected is None:
+        log(
+            "WARNING: no authoritative file sizes are available, so this snapshot "
+            "cannot be proven intact; it is recorded as unverified and will be "
+            "checked again on the next boot"
+        )
+        return snapshot, attempts, False
+
+    broken = _mismatches(snapshot, expected)
+    if not broken:
+        log(f"verified {len(expected)} file(s) against the hub")
+        return snapshot, attempts, True
+
+    log(f"{len(broken)} file(s) do not match what the hub reports; repairing")
+    _discard(snapshot, broken, log=log)
+    snapshot, retry_attempts = _download_with_retries(
+        config, downloader=downloader, log=log, now=now, sleep=sleep
+    )
+    attempts += retry_attempts
+
+    broken = _mismatches(snapshot, expected)
+    if broken:
+        raise ModelPreparationError(
+            f"{len(broken)} file(s) still do not match the hub after re-downloading: "
+            + ", ".join(broken[:5]),
+            hint=(
+                "the volume may be failing or full. Nothing was marked ready, so the "
+                "next boot will try again rather than serve corrupt weights."
+            ),
+        )
+    log("repair succeeded; the snapshot now matches the hub")
+    return snapshot, attempts, True
+
+
 def _already_prepared(config: WorkerConfig, *, log: Callable[[str], None]) -> ModelState | None:
     """The warm path: a marker that matches and a snapshot that still verifies."""
     marker = read_marker(config.layout)
@@ -360,6 +533,9 @@ def _already_prepared(config: WorkerConfig, *, log: Callable[[str], None]) -> Mo
             f"marker describes {marker.model_id}@{marker.revision[:12]}, "
             f"which is not what was requested; preparing again"
         )
+        return None
+    if not marker.verified:
+        log("the recorded preparation was never checked against the hub; preparing again")
         return None
     ok, problems = verify_snapshot(Path(marker.snapshot_path), marker.files)
     if ok:
@@ -471,13 +647,7 @@ def _snapshot_download(**kwargs: Any) -> str:
             token=kwargs.get("token"),
             # Weights and config only. Fetching every file would also pull the
             # duplicate .pt/.gguf variants some repositories carry.
-            allow_patterns=[
-                "*.safetensors",
-                "*.json",
-                "*.txt",
-                "*.model",
-                "*.jinja",
-            ],
+            allow_patterns=list(ALLOW_PATTERNS),
             max_workers=8,
         )
     )

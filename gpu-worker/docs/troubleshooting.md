@@ -139,10 +139,16 @@ Cloudflare's 100-second ceiling. Not a worker fault. See
 
 ## Security
 
-### `a non-empty service token is required`
+### `api key    NOT SET (open port)` in the preflight banner
 
-`VLLM_API_KEY` is unset while the port is exposed publicly. Refusing to start
-beats starting with authentication silently disabled.
+`VLLM_API_KEY` is unset. **The worker starts anyway** — it has no way to know
+whether its port is reachable from the internet, and refusing to boot would
+break every private-network deployment. The banner says so on every start, and
+it is the operator's job to act on it.
+
+If the Pod exposes a public TCP port, treat this line as a defect and set the
+key. The key is passed to vLLM through the environment and never appears in the
+argument vector, so it does not reach `/proc/1/cmdline` or any log.
 
 Note honestly what an API key buys you: it stops casual access, not a
 determined one. A public TCP port on a GPU worth several dollars an hour

@@ -361,9 +361,25 @@ def test_extra_args_are_appended_last_and_untouched() -> None:
     assert config.vllm_argv()[-3:] == ["--enable-prefix-caching", "--seed", "7"]
 
 
-def test_redacted_argv_masks_only_the_key() -> None:
+def test_the_api_key_never_reaches_the_argument_vector() -> None:
+    """vLLM reads VLLM_API_KEY from the environment; argv is world-readable.
+
+    An argument would put the secret in /proc/1/cmdline for anything able to
+    read the process table, and in whatever file the vector is marshalled
+    through on its way to exec.
+    """
+    config = WorkerConfig.from_env({"VLLM_API_KEY": "sk-live-1234"})
+
+    argv = config.vllm_argv()
+
+    assert "sk-live-1234" not in argv
+    assert "--api-key" not in argv
+
+
+def test_redacted_argv_masks_a_key_an_operator_wrote_into_extra_args() -> None:
+    """The worker adds no key of its own, but VLLM_EXTRA_ARGS is free-form."""
     config = WorkerConfig.from_env(
-        {"VLLM_API_KEY": "sk-live-1234", "VLLM_EXTRA_ARGS": "--enable-prefix-caching"}
+        {"VLLM_EXTRA_ARGS": "--enable-prefix-caching --api-key sk-live-1234"}
     )
 
     clear = config.vllm_argv()
@@ -372,22 +388,18 @@ def test_redacted_argv_masks_only_the_key() -> None:
     assert clear[clear.index("--api-key") + 1] == "sk-live-1234"
     assert redacted[redacted.index("--api-key") + 1] == "***"
     assert "sk-live-1234" not in redacted
-    # Everything but the one masked word is identical.
-    index = clear.index("--api-key") + 1
-    assert clear[:index] == redacted[:index]
-    assert clear[index + 1 :] == redacted[index + 1 :]
-    assert redacted[-1] == "--enable-prefix-caching"
+    assert "--enable-prefix-caching" in redacted
 
 
-def test_redacted_argv_is_a_noop_without_a_key() -> None:
-    config = WorkerConfig.from_env({})
+def test_redacted_argv_also_masks_the_joined_form() -> None:
+    config = WorkerConfig.from_env({"VLLM_EXTRA_ARGS": "--api-key=sk-live-1234"})
 
-    assert config.redacted_argv() == config.vllm_argv()
-    assert "--api-key" not in config.vllm_argv()
+    assert "--api-key=***" in config.redacted_argv()
+    assert "sk-live-1234" not in " ".join(config.redacted_argv())
 
 
 def test_redacted_argv_does_not_mutate_the_clear_vector() -> None:
-    config = WorkerConfig.from_env({"VLLM_API_KEY": "sk-live-1234"})
+    config = WorkerConfig.from_env({"VLLM_EXTRA_ARGS": "--api-key sk-live-1234"})
 
     config.redacted_argv()
     assert "sk-live-1234" in config.vllm_argv()

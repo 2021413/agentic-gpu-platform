@@ -139,19 +139,35 @@ Tool execution is not this component's concern, but exposure is:
 
 ```bash
 pytest tests -q                    # no GPU, no network, no container
-pytest tests -q -m integration     # needs a container runtime
-pytest tests -q -m runpod          # provisions a real Pod; costs money; opt-in
+pytest -m integration tests -q     # reaches huggingface.co with a 300 KB model
+pytest -m runpod tests -q          # provisions a real Pod; costs money; opt-in
 ```
 
-CI never needs a GPU and never downloads the model. It also asserts the
-invariant mechanically: the built image is exported and searched for weight
-files, and the boot refuses without a volume.
+The default selection really is offline: `addopts` in `pyproject.toml`
+deselects `integration`, `gpu` and `runpod`, so the promise above is enforced by
+configuration rather than by convention.
+
+CI lives at the repository root, in
+[`.github/workflows/gpu-worker-ci.yml`](../.github/workflows/gpu-worker-ci.yml),
+because GitHub only reads workflows from there. It never needs a GPU and never
+downloads the model, and it asserts the invariant mechanically rather than
+trusting it: the built image is exported and searched for weight files, the
+cache variables are checked to point at the volume, and booting without a
+volume must exit 3.
 
 The real-GPU validation is deliberately opt-in behind both `RUNPOD_API_KEY` and
 an explicit flag, and records `cold_start_seconds`, `model_download_seconds`,
 `model_load_seconds`, `warm_restart_seconds` and `first_token_latency_seconds`.
 
 ---
+
+## Deploying from the command line
+
+`tools/runpod_deployer` creates a Pod, waits for genuine readiness, runs a real
+completion, and refuses to destroy anything without `--yes`. The RunPod key is
+read from `RUNPOD_API_KEY` and nowhere else — no flag, no file, no default — and
+is redacted from every log and error path. See
+[`docs/runpod.md`](docs/runpod.md#automated-deployment).
 
 ## Documentation
 
