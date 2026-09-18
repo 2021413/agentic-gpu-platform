@@ -95,6 +95,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      - name: make room for a 24 GB image
+        # A standard ubuntu-latest runner offers about 14 GB free, and this
+        # image unpacks to 24.2 GB. Without this the build dies on ENOSPC after
+        # pulling most of the base. Removing the preinstalled toolchains we do
+        # not use frees roughly 25-30 GB. Written inline rather than pulled from
+        # a third-party action: this runs with a token that can publish packages.
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/share/swift || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
       - name: build
         uses: docker/build-push-action@v6
         with:
