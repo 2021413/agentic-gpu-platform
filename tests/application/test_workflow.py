@@ -145,7 +145,7 @@ async def test_the_planner_is_skipped_for_a_trivial_objective(platform: Platform
     assert platform.store.runs.items[view.id].status is RunStatus.COMPLETED
 
 
-@pytest.mark.tool_exit_codes({"test": 1})
+@pytest.mark.tool_exit_codes({"run_tests": 1})
 async def test_a_failing_test_suite_triggers_repair(platform: Platform, project):
     await platform.add_worker()
     view = await create_run(
@@ -172,7 +172,7 @@ async def test_a_failing_build_skips_the_test_stage(platform: Platform, project)
 
     ran = {i.tool for i in platform.tools.invocations}
     assert "build" in ran
-    assert "test" not in ran
+    assert "run_tests" not in ran
     assert platform.store.runs.items[view.id].status is RunStatus.FAILED
 
 

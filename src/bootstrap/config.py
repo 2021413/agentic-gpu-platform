@@ -40,6 +40,11 @@ class Environment(StrEnum):
     def is_production(self) -> bool:
         return self is Environment.PRODUCTION
 
+    @property
+    def is_local(self) -> bool:
+        """Local and CI both run without a GPU and without Docker-in-Docker."""
+        return self in (Environment.LOCAL, Environment.CI)
+
 
 @unique
 class LLMProviderKind(StrEnum):
