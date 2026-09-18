@@ -24,10 +24,16 @@ __all__ = [
     "WorkerConfig",
 ]
 
-# The model is 31.2 GB on 4 shards. A volume sized to the weights alone will
-# fail the first time a revision changes or a download resumes, so the default
-# floor leaves room for one in-flight download on top of one resident snapshot.
-DEFAULT_MIN_FREE_DISK_GB = 60.0
+# The model is 31.2 GB across 4 shards, and the hub client keeps partial blobs
+# while it resumes, so a cold start needs the weights plus roughly one shard of
+# headroom. 40 GB covers that.
+#
+# It is deliberately NOT sized for "weights plus a second revision": the check
+# only runs on a cold start, and demanding more free space than the recommended
+# volume can ever offer would make the worker refuse to boot on a volume that is
+# perfectly adequate. A 60 GB volume presents about 58 GB free — a floor of 60
+# would fail every first boot.
+DEFAULT_MIN_FREE_DISK_GB = 40.0
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 DEFAULT_PERSISTENT_ROOT = "/runpod-volume"

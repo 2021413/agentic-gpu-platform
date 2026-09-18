@@ -9,7 +9,7 @@ This worker runs as an ordinary **RunPod Pod**. Not Serverless — see
 |---|---|
 | GPU | 1× H100 80GB or H200 (compute capability 9.0, required for hardware FP8) |
 | Container disk | **50 GB** — the image alone unpacks to ~24 GB; no weights ever land here |
-| Network volume | **150 GB**, mounted at `/runpod-volume` ([sizing](persistent-storage.md#sizing)) |
+| Network volume | **60 GB**, mounted at `/runpod-volume` ([sizing](persistent-storage.md#sizing)) |
 | Exposed port | 8000 |
 | Image | `<registry>/agentic-gpu-worker:<semver>` — a pinned tag, never `latest` |
 

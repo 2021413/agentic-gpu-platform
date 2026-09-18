@@ -49,13 +49,23 @@ first time anything else needs room.
 | **Single revision, comfortable** | **~50 GB** |
 | A second revision, for a rolling model upgrade | +31.2 GB |
 
-**Recommended volume: 150 GB.** Absolute minimum for one resident revision:
-80 GB. Snapshots are symlinks into the blob store, so a snapshot does *not*
+**Sizing rule:** `volume = weight size + 25 GB`, and
+`MIN_FREE_DISK_GB = weight size + 10`. For the default model that is a **60 GB
+volume** with `MIN_FREE_DISK_GB=40`.
+
+Size for 2× the weights only if you want two revisions resident so you can roll
+back by changing one variable, with no download. At the high-performance rate
+measured in EU-FR-1 ($0.142/GB/month), that convenience costs about $4.50 a
+month for this model — worth it or not depending on how often you switch.
+
+Changing model? Follow [changing-the-model.md](changing-the-model.md); the three
+numbers above must agree or the Pod fails to boot. Snapshots are symlinks into the blob store, so a snapshot does *not*
 double the cost — which is also why `directory_size_bytes` counts each inode
 once, and why a naive `du -L` will tell you the model is twice its real size.
 
-`MIN_FREE_DISK_GB` defaults to **60**: enough for a full cold download plus the
-resume headroom plus the caches. It is checked before the first byte is
+`MIN_FREE_DISK_GB` defaults to **40**: the weights plus roughly one shard of
+resume headroom. It must stay *below* what the volume can offer — a 60 GB volume
+presents about 58 GB free, so a floor of 60 would fail every first boot. It is checked before the first byte is
 fetched, and only on a cold start — a volume that already holds a verified
 model is allowed to be nearly full, because nothing large is about to be
 written.

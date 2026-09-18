@@ -30,7 +30,7 @@ same volume attached does **not** re-download 31 GB.
 docker build -t agentic-gpu-worker:1.0.0 .
 ```
 
-Deploy as a RunPod Pod with a 150 GB network volume mounted at
+Deploy as a RunPod Pod with a 60 GB network volume mounted at
 `/runpod-volume`, port 8000 exposed, and:
 
 ```bash
@@ -90,7 +90,7 @@ Environment-driven, validated as a whole at boot. Every key is documented in
 | `MODEL_ID` | `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` | 31.2 GB, FP8 e4m3 block-quantised |
 | `MODEL_REVISION` | unset | **pin it in production**, or `main` can move under you |
 | `PERSISTENT_ROOT` | `/runpod-volume` | where RunPod mounts network volumes |
-| `MIN_FREE_DISK_GB` | `60` | weights + a resuming download + caches |
+| `MIN_FREE_DISK_GB` | `40` | weights + one resuming shard; see [changing the model](docs/changing-the-model.md) |
 | `MAX_MODEL_LEN` | `16384` | the model supports 262144; the KV cache is what costs |
 | `GPU_MEMORY_UTILIZATION` | `0.90` | leaves room for the CUDA context |
 | `TENSOR_PARALLEL_SIZE` | `1` | never inferred — see below |
@@ -174,6 +174,7 @@ is redacted from every log and error path. See
 | | |
 |---|---|
 | [`docs/runpod.md`](docs/runpod.md) | deployment, networking, scaling, why not Serverless |
+| [`docs/changing-the-model.md`](docs/changing-the-model.md) | **serving a different model**: measuring it, sizing, pinning, verifying |
 | [`docs/persistent-storage.md`](docs/persistent-storage.md) | layout, sizing, the marker, the lock |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | every failure mode and its diagnostic |
 
