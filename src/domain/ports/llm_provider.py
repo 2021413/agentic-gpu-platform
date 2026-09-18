@@ -32,8 +32,14 @@ class LLMProvider(Protocol):
         """
         ...
 
-    async def stream(self, request: CompletionRequest) -> AsyncIterator[str]:
+    def stream(self, request: CompletionRequest) -> AsyncIterator[str]:
         """Yield incremental content chunks.
+
+        Declared as a plain ``def`` returning an async iterator, like
+        ``EventBus.subscribe``: an ``async def`` here would be ambiguous, since a
+        coroutine returning an iterator and an async generator share that
+        annotation but are consumed differently (``async for await f()`` versus
+        ``async for f()``). Implementations are async generators.
 
         Streaming carries visible output only; hidden reasoning is never
         forwarded to clients (spec section 21).

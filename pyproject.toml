@@ -49,6 +49,11 @@ agentic-worker = "worker_agent.main:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/domain", "src/application", "src/infrastructure", "src/interfaces", "src/bootstrap", "src/worker_agent"]
 
+# Prompt templates are runtime data, not source; without this a wheel installs
+# an agent that cannot speak.
+[tool.hatch.build.targets.wheel.force-include]
+"prompts" = "prompts"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
