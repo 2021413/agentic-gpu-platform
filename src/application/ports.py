@@ -14,8 +14,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from application.dto.agent_io import CodeDraft, PlanDraft, ReviewDraft
+from domain.entities.project import Project
 from domain.enums import AgentRole
 from domain.ports.repositories import UnitOfWork
+from domain.ports.tools import ToolExecutor
 from domain.value_objects.identifiers import RunId
 from domain.value_objects.llm import ChatMessage
 
@@ -25,6 +27,7 @@ __all__ = [
     "PromptRenderer",
     "RenderedPrompt",
     "RunCoordinator",
+    "ToolExecutorFactory",
     "UnitOfWorkFactory",
 ]
 
@@ -122,4 +125,23 @@ class RunCoordinator(Protocol):
 
     def lock(self, run_id: RunId) -> AbstractAsyncContextManager[None]:
         """Held for the duration of one run decision."""
+        ...
+
+
+@runtime_checkable
+class ToolExecutorFactory(Protocol):
+    """Builds the tool set a role may use on a given project.
+
+    Which tools exist is a property of the project, not of the platform: the
+    build and test commands come from its toolchain, and a project that
+    configures none simply has no such tool. Handing the orchestrator one
+    global executor would have forced it to invent commands instead.
+    """
+
+    def for_project(self, project: Project, *, role: AgentRole) -> ToolExecutor:
+        """Executor restricted to what ``role`` may run on ``project``."""
+        ...
+
+    def available_tools(self, project: Project, *, role: AgentRole) -> Sequence[str]:
+        """Tool names available, so a stage with no command can be skipped."""
         ...

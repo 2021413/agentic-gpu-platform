@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CandidateError",
+    "ConcurrencyConflictError",
     "DomainError",
     "EntityNotFoundError",
     "IdempotencyConflictError",
@@ -219,6 +220,22 @@ class CandidateError(DomainError):
     """A candidate reached an unusable state."""
 
     code = "candidate_error"
+
+
+class ConcurrencyConflictError(DomainError):
+    """Two writers raced for the same aggregate and one lost.
+
+    Exists so infrastructure can translate an optimistic-locking failure
+    without leaking its ORM upwards. It is retryable: the loser re-reads and
+    re-applies its decision.
+    """
+
+    code = "concurrency_conflict"
+
+    def __init__(self, entity: str, identifier: object) -> None:
+        super().__init__(f"{entity} was modified concurrently", entity=entity, id=str(identifier))
+        self.entity = entity
+        self.identifier = identifier
 
 
 class IdempotencyConflictError(DomainError):
