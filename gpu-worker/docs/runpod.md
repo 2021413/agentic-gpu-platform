@@ -117,21 +117,44 @@ If the orchestrator runs on RunPod too, this is the right answer.
 
 | Path | Long generations | Public exposure | Stable address |
 |---|---|---|---|
-| Proxy | ✗ 100 s ceiling | yes (HTTPS) | yes |
+| Proxy | only if the client streams | yes (HTTPS) | yes |
 | Direct TCP | ✓ | yes (needs API key) | IP yes on Secure Cloud, port no |
 | Global networking | ✓ | no | yes |
 
-## Streaming, and what it would change
+## Streaming, and why it fixes the proxy
 
-Cloudflare's 524 fires when the origin fails to return **headers** in time. A
-streaming completion sends headers immediately and then tokens, which should
-keep the proxy viable for long generations. The wording RunPod publishes —
-"maximum connection time" — is ambiguous enough that this must be **measured**
-rather than assumed, which is what `first_token_latency_seconds` in the real
-GPU validation is for.
+Cloudflare documents 524 precisely, and the precision matters:
 
-Until it is measured on a real Pod, treat direct TCP or global networking as
-the supported inference path.
+> Error 524 indicates that Cloudflare successfully connected to the origin web
+> server, but the origin did not provide an HTTP response before the default
+> 125 seconds **Proxy Read Timeout**. [...] The error 524 occurs if the origin
+> web server acknowledges the resource request after the connection has been
+> established, but does not send a timely response within the Proxy Read
+> Timeout delay.
+
+It is a **read** timeout, not a cap on total connection time. A proxy read
+timeout is rearmed by every chunk the origin sends. So:
+
+* A **non-streaming** completion sends nothing until generation ends. Its
+  time-to-first-byte is its generation time, and past the window it becomes a
+  524.
+* A **streaming** completion sends headers immediately and then a token every
+  few tens of milliseconds. The read timer never expires, and total duration
+  stops mattering.
+
+(RunPod documents 100 seconds where Cloudflare documents 125; RunPod presumably
+configures it lower. The mechanism is identical either way.)
+
+**Consequence for a client of this worker:** request `"stream": true` and
+accumulate the deltas, and the proxy becomes viable for long generations. A
+client that sends `"stream": false` must use direct TCP or global networking
+instead.
+
+This is a mechanism, not a measurement. RunPod's load balancer sits between
+Cloudflare and the Pod and may impose limits of its own, so the opt-in real-GPU
+validation records `first_token_latency_seconds` and exercises both paths.
+Until that has run on real hardware, direct TCP remains the recommendation for
+non-streaming clients.
 
 ## Multiple GPUs
 
