@@ -1,0 +1,118 @@
+name: gpu-worker release
+
+# Production tags are immutable. `latest` is never published from here: a Pod
+# that silently picks up a new image is a Pod that silently changes what it
+# serves, and this image's whole value is that it does not do that.
+on:
+  push:
+    tags: ["gpu-worker-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "semver to publish, without a leading v"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository }}/agentic-gpu-worker
+
+jobs:
+  verify:
+    name: gates must pass before anything is pushed
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gpu-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tools tests
+      - run: ruff format --check src tools tests
+      - run: mypy src/worker tools
+      - run: pytest tests -q -m "not gpu and not runpod and not integration"
+
+  publish:
+    name: build and push an immutable tag
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: resolve the version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#gpu-worker-v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: the published version must match the package
+        # Two sources of truth for a version is one too many; a mismatch here
+        # means an image tagged with something the code does not claim to be.
+        run: |
+          declared=$(grep -m1 '^version = ' gpu-worker/pyproject.toml | cut -d'"' -f2)
+          if [ "$declared" != "${{ steps.version.outputs.version }}" ]; then
+            echo "tag says ${{ steps.version.outputs.version }}, pyproject says $declared"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+      - name: make room for a 24 GB image
+        # A standard ubuntu-latest runner offers about 14 GB free, and this
+        # image unpacks to 24.2 GB. Without this the build dies on ENOSPC after
+        # pulling most of the base. Removing the preinstalled toolchains we do
+        # not use frees roughly 25-30 GB. Written inline rather than pulled from
+        # a third-party action: this runs with a token that can publish packages.
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/share/swift || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: gpu-worker
+          file: gpu-worker/Dockerfile
+          push: true
+          # Two immutable tags and no floating one. The sha tag is what an
+          # incident report can be pinned to when the semver is ambiguous.
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.version.outputs.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+
+      - name: the published image must contain no model weight
+        run: |
+          image="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.version.outputs.version }}"
+          docker pull "$image"
+          docker create --name published "$image"
+          docker export published | tar -tv > /tmp/published.txt || true
+          docker rm published
+          if grep -qE "\.safetensors|\.gguf" /tmp/published.txt; then
+            echo "a model weight was published inside the image"
+            exit 1
+          fi
+          echo "verified: no model weights in $image"
