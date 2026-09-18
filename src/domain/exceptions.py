@@ -17,6 +17,7 @@ __all__ = [
     "DomainError",
     "EntityNotFoundError",
     "IdempotencyConflictError",
+    "InferenceError",
     "InvalidStateTransitionError",
     "JobLeaseExpiredError",
     "LLMTimeoutError",
@@ -100,6 +101,31 @@ class NoCompatibleWorkerError(DomainError):
 
     def __init__(self, reason: str = "no compatible worker available", **details: Any) -> None:
         super().__init__(reason, **details)
+
+
+class InferenceError(DomainError):
+    """The inference engine answered with a failure, or could not be reached.
+
+    Distinct from ``LLMTimeoutError`` (a deadline) and from
+    ``StructuredOutputError`` (a well-formed answer that violates its schema):
+    this is the engine itself misbehaving, which the retry policy treats as a
+    reason to try a different worker.
+    """
+
+    code = "inference_failed"
+
+    def __init__(
+        self, message: str, *, status_code: int | None = None, model: str | None = None
+    ) -> None:
+        super().__init__(message, status_code=status_code, model=model)
+        self.status_code = status_code
+
+    @property
+    def is_retryable(self) -> bool:
+        """Transient server-side conditions deserve another attempt elsewhere."""
+        if self.status_code is None:
+            return True
+        return self.status_code in (408, 409, 425, 429) or self.status_code >= 500
 
 
 class LLMTimeoutError(DomainError):
