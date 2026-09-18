@@ -125,9 +125,15 @@ jobs:
           docker create --name inspect agentic-gpu-worker:ci
           docker export inspect | tar -tv > /tmp/layers.txt || true
           docker rm inspect
-          if grep -qE "\.safetensors|\.gguf|\.bin$" /tmp/layers.txt; then
+          # Size matters: compressed_tensors, a vLLM dependency, ships a 1.4 MB
+          # hadamards.safetensors, and .bin matches half the CUDA runtime.
+          # Matching on the extension alone fails every run. A shard of this
+          # model is 10 GB, so 64 MB is a floor nothing legitimate crosses.
+          offenders="$(awk '$3 > 67108864 && $NF ~ /\.(safetensors|gguf|pt)$/ {print $3, $NF}' \
+                       /tmp/layers.txt)"
+          if [ -n "$offenders" ]; then
             echo "model weights found inside the image:"
-            grep -E "\.safetensors|\.gguf|\.bin$" /tmp/layers.txt | head
+            echo "$offenders"
             exit 1
           fi
           echo "no model weights in the image"

@@ -111,8 +111,14 @@ jobs:
           docker create --name published "$image"
           docker export published | tar -tv > /tmp/published.txt || true
           docker rm published
-          if grep -qE "\.safetensors|\.gguf" /tmp/published.txt; then
-            echo "a model weight was published inside the image"
+          # Size matters: compressed_tensors, a vLLM dependency, ships a 1.4 MB
+          # hadamards.safetensors. Matching on the extension alone fails every
+          # run. A shard of this model is 10 GB.
+          offenders="$(awk '$3 > 67108864 && $NF ~ /\.(safetensors|gguf)$/ {print $3, $NF}' \
+                       /tmp/published.txt)"
+          if [ -n "$offenders" ]; then
+            echo "a model weight was published inside the image:"
+            echo "$offenders"
             exit 1
           fi
           echo "verified: no model weights in $image"
