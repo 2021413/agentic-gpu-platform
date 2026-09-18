@@ -161,3 +161,12 @@ class UnitOfWork(Protocol):
     def collect(self, *entities: object) -> None:
         """Register aggregates whose buffered events must be drained on commit."""
         ...
+
+    @property
+    def collected_events(self) -> Sequence[DomainEvent]:
+        """Events drained by the last successful commit.
+
+        Publication happens *after* the transaction, so a rollback can never
+        leave subscribers believing in something that was never stored.
+        """
+        ...
