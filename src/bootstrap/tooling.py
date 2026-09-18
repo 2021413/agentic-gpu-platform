@@ -25,10 +25,28 @@ class ProjectToolExecutorFactory:
 
     def __init__(self, *, sandbox: SandboxExecutor) -> None:
         self._sandbox = sandbox
-        self._cache: dict[tuple[AgentRole, ToolchainConfig], ToolRegistry] = {}
+        self._cache: dict[tuple[AgentRole, tuple[str | None, ...]], ToolRegistry] = {}
+
+    @staticmethod
+    def _fingerprint(toolchain: ToolchainConfig) -> tuple[str | None, ...]:
+        """A hashable summary of what actually shapes the tool set.
+
+        ``ToolchainConfig`` itself cannot key the cache: it carries an
+        ``environment`` mapping, and a frozen dataclass holding a dict is not
+        hashable. Only the commands change which tools exist.
+        """
+        return (
+            toolchain.language,
+            toolchain.build_command,
+            toolchain.test_command,
+            toolchain.static_analysis_command,
+            toolchain.install_command,
+            toolchain.working_subdirectory,
+            "\x00".join(f"{k}={v}" for k, v in sorted(toolchain.environment.items())),
+        )
 
     def registry(self, project: Project, *, role: AgentRole) -> ToolRegistry:
-        key = (role, project.toolchain)
+        key = (role, self._fingerprint(project.toolchain))
         cached = self._cache.get(key)
         if cached is None:
             cached = build_tool_registry(
