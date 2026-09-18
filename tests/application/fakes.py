@@ -422,14 +422,12 @@ class FakeWorkerRegistry:
     async def deregister(self, worker_id: WorkerId) -> None:
         self.workers.pop(worker_id, None)
 
-    async def reap_stale(
-        self, *, now: datetime, heartbeat_timeout: timedelta
-    ) -> Sequence[WorkerId]:
-        reaped: list[WorkerId] = []
+    async def reap_stale(self, *, now: datetime, heartbeat_timeout: timedelta) -> Sequence[Worker]:
+        reaped: list[Worker] = []
         for worker in list(self.workers.values()):
             if worker.is_stale(now, heartbeat_timeout) and worker.status.is_live:
                 worker.mark_unavailable(now=now, reason="heartbeat timeout")
-                reaped.append(worker.id)
+                reaped.append(worker)
         return reaped
 
 

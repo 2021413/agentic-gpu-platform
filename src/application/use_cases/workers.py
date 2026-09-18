@@ -178,7 +178,12 @@ class ListWorkersUseCase:
 
 
 class ReapStaleWorkersUseCase:
-    """Declare silent workers unavailable so their jobs can be retried elsewhere."""
+    """Declare silent workers unavailable so their jobs can be retried elsewhere.
+
+    The events the registry produced are published here. A fleet losing workers
+    is precisely what an operator needs to see, so swallowing those events would
+    make the most interesting failure the quietest one.
+    """
 
     def __init__(
         self,
@@ -186,12 +191,18 @@ class ReapStaleWorkersUseCase:
         registry: WorkerRegistry,
         clock: Clock,
         heartbeat_timeout: timedelta,
+        bus: EventBus | None = None,
     ) -> None:
         self._registry = registry
         self._clock = clock
         self._timeout = heartbeat_timeout
+        self._bus = bus
 
     async def execute(self) -> Sequence[WorkerId]:
-        return await self._registry.reap_stale(
+        reaped = await self._registry.reap_stale(
             now=self._clock.now(), heartbeat_timeout=self._timeout
         )
+        if self._bus is not None:
+            for worker in reaped:
+                await self._bus.publish(worker.pull_events())
+        return [worker.id for worker in reaped]

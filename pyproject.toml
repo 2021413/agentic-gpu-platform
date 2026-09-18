@@ -34,6 +34,8 @@ dev = [
     "mypy>=1.13",
     "testcontainers[postgres,redis]>=4.8",
     "pre-commit>=4.0",
+    # Pinned stubs, stale at the 4.6 API: redis>=5 ships py.typed but the stubs
+    # take precedence. Removal is tracked with the Redis adapter.
     "types-redis>=4.6",
 ]
 telemetry = [
