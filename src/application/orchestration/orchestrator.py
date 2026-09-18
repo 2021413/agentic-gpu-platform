@@ -43,6 +43,7 @@ from domain.enums import (
 from domain.exceptions import (
     DomainError,
     EntityNotFoundError,
+    InferenceError,
     LLMTimeoutError,
     NoCompatibleWorkerError,
     StructuredOutputError,
@@ -898,7 +899,7 @@ def _classify(exc: Exception) -> FailureKind:
     """Map an exception to the failure kind the retry policy branches on."""
     if isinstance(exc, StructuredOutputError):
         return FailureKind.INVALID_STRUCTURED_OUTPUT
-    if isinstance(exc, LLMTimeoutError):
+    if isinstance(exc, LLMTimeoutError | InferenceError):
         return FailureKind.INFERENCE
     if isinstance(exc, NoCompatibleWorkerError):
         return FailureKind.INFRASTRUCTURE
