@@ -221,6 +221,36 @@ class WorkerConfig:
             raise ConfigError(f"PORT must be a valid port, got {self.port}", variable="PORT")
         if self.min_free_disk_gb < 0:
             raise ConfigError("MIN_FREE_DISK_GB must not be negative", variable="MIN_FREE_DISK_GB")
+        # The timing group was unvalidated, so MODEL_DOWNLOAD_MAX_ATTEMPTS=0 was
+        # accepted and produced a worker that never attempted a single download
+        # and then reported "download failed after 0 attempts".
+        for name, variable, value, floor in (
+            ("download_max_attempts", "MODEL_DOWNLOAD_MAX_ATTEMPTS", self.download_max_attempts, 1),
+            (
+                "download_backoff_seconds",
+                "MODEL_DOWNLOAD_BACKOFF_SECONDS",
+                self.download_backoff_seconds,
+                0,
+            ),
+            (
+                "readiness_timeout_seconds",
+                "READINESS_TIMEOUT_SECONDS",
+                self.readiness_timeout_seconds,
+                0,
+            ),
+            ("readiness_poll_seconds", "READINESS_POLL_SECONDS", self.readiness_poll_seconds, 0),
+            ("lock_timeout_seconds", "MODEL_LOCK_TIMEOUT_SECONDS", self.lock_timeout_seconds, 0),
+        ):
+            if value < floor:
+                raise ConfigError(
+                    f"{variable} must be at least {floor}, got {value:g}",
+                    variable=variable,
+                    hint=(
+                        "a zero attempt budget means the worker never tries to download"
+                        if name == "download_max_attempts"
+                        else None
+                    ),
+                )
         if not self.persistent_root.is_absolute():
             raise ConfigError(
                 f"PERSISTENT_ROOT must be an absolute path, got {self.persistent_root}",

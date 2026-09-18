@@ -129,14 +129,21 @@ def wait_until_ready(
     wrong snapshot path — which would otherwise fail much later as a puzzling
     404 from the orchestrator.
     """
-    deadline_total = timeout_seconds or config.readiness_timeout_seconds
-    interval = poll_seconds or config.readiness_poll_seconds
+    # ``or`` would treat an explicit 0 as absent. Zero is a legitimate request
+    # here — "check once, do not wait" — and silently turning it into the 1800 s
+    # default is the kind of bug that only shows up as a hung boot.
+    deadline_total = (
+        config.readiness_timeout_seconds if timeout_seconds is None else timeout_seconds
+    )
+    interval = config.readiness_poll_seconds if poll_seconds is None else poll_seconds
     started = now()
     deadline = started + deadline_total
     expected = config.public_model_name
     detail = "no attempt completed"
 
-    while now() < deadline:
+    first_pass = True
+    while first_pass or now() < deadline:
+        first_pass = False
         try:
             models = list_models(config)
         except (NotReadyError, httpx.HTTPError) as exc:

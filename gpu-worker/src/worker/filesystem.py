@@ -190,7 +190,15 @@ def ensure_layout(config: WorkerConfig, *, require_mount: bool = True) -> Persis
                 f"could not create {root}: {exc.strerror or exc}", path=root
             ) from exc
     if not root.is_dir():
-        raise StorageError(f"{root} is not a directory", path=root)
+        raise StorageError(
+            f"{root} exists but is not a directory",
+            path=root,
+            hint=(
+                "something else already occupies the mount point — usually a file "
+                "created by an earlier run before the volume was attached. Remove it "
+                "and restart the Pod with the volume mounted there."
+            ),
+        )
 
     if require_mount and not is_separate_mount(root):
         raise StorageError(
