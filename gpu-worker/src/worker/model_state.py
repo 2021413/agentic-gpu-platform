@@ -325,7 +325,7 @@ def prepare_model(
             )
 
         _require_free_space(config, log=log)
-        snapshot = _download_with_retries(
+        snapshot, attempts = _download_with_retries(
             config, downloader=downloader, log=log, now=now, sleep=sleep
         )
         files = snapshot_files(snapshot)
@@ -345,7 +345,7 @@ def prepare_model(
         return PreparationOutcome(
             state,
             downloaded=True,
-            attempts=1,
+            attempts=attempts,
             duration_seconds=now() - started,
         )
 
@@ -397,8 +397,12 @@ def _download_with_retries(
     log: Callable[[str], None],
     now: Callable[[], float],
     sleep: Callable[[float], None],
-) -> Path:
-    """Download, resuming on transient failure and stopping on a full disk."""
+) -> tuple[Path, int]:
+    """Download, resuming on transient failure and stopping on a full disk.
+
+    Returns the snapshot and how many attempts it really took. Reporting a
+    constant 1 would hide a retry storm from the operator watching the boot.
+    """
     fetch = downloader if downloader is not None else _snapshot_download
     last: Exception | None = None
 
@@ -435,7 +439,7 @@ def _download_with_retries(
             sleep(delay)
             continue
         log(f"download finished in {now() - started:.0f}s")
-        return Path(path)
+        return Path(path), attempt
 
     raise ModelPreparationError(
         f"download failed after {config.download_max_attempts} attempts: {last}",

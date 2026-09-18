@@ -230,14 +230,28 @@ def prepare_main(argv: Sequence[str] | None = None) -> int:
 
 
 def serve_args_main(argv: Sequence[str] | None = None) -> int:
-    """Print the exact vLLM argument vector, one word per line.
+    """Print the exact vLLM argument vector, NUL-separated.
 
-    The entrypoint reads these into an array and ``exec``s them. Passing a
+    The entrypoint reads these into a bash array and ``exec``s them. Passing a
     string through a shell instead would let any environment variable inject a
     command, which is why nothing here is ever concatenated.
+
+    NUL rather than newline, and this is not pedantry: ``shlex`` happily
+    produces a word that *contains* a newline — ``VLLM_EXTRA_ARGS='--chat-template
+    "a\nb"'`` is a legitimate thing to write — and a line-oriented protocol
+    would split it in two, so vLLM would be exec'd with arguments nobody wrote.
+    NUL is the one byte an argv word cannot contain.
+
+    ``--lines`` exists for a human reading the output, and must never be what
+    the entrypoint consumes.
     """
     parser = argparse.ArgumentParser(description="Print the vLLM argument vector")
     parser.add_argument("--redacted", action="store_true", help="replace the API key, for logging")
+    parser.add_argument(
+        "--lines",
+        action="store_true",
+        help="separate words by newline instead of NUL (human reading only)",
+    )
     args = parser.parse_args(argv)
 
     config = _load_config()
@@ -249,8 +263,12 @@ def serve_args_main(argv: Sequence[str] | None = None) -> int:
         snapshot = marker.snapshot_path
 
     words = config.redacted_argv(snapshot) if args.redacted else config.vllm_argv(snapshot)
-    for word in words:
-        _out(word)
+    if args.lines:
+        for word in words:
+            _out(word)
+        return EXIT_OK
+    sys.stdout.write("\0".join(words) + "\0")
+    sys.stdout.flush()
     return EXIT_OK
 
 
@@ -292,7 +310,9 @@ def smoke_main(argv: Sequence[str] | None = None) -> int:
     result = smoke_test(
         config,
         timeout=args.timeout,
-        **({"max_tokens": args.max_tokens} if args.max_tokens else {}),
+        # ``if args.max_tokens`` would drop an explicit 0 and quietly restore the
+        # default; an absent flag is None, and only None means "use the default".
+        **({"max_tokens": args.max_tokens} if args.max_tokens is not None else {}),
     )
     for line in result.render():
         (_out if result.passed else _err)(line)
