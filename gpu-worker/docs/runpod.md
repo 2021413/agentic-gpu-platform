@@ -8,10 +8,16 @@ This worker runs as an ordinary **RunPod Pod**. Not Serverless — see
 | | |
 |---|---|
 | GPU | 1× H100 80GB or H200 (compute capability 9.0, required for hardware FP8) |
-| Container disk | 20 GB — the image only; no weights ever land here |
+| Container disk | **50 GB** — the image alone unpacks to ~24 GB; no weights ever land here |
 | Network volume | **150 GB**, mounted at `/runpod-volume` ([sizing](persistent-storage.md#sizing)) |
 | Exposed port | 8000 |
 | Image | `<registry>/agentic-gpu-worker:<semver>` — a pinned tag, never `latest` |
+
+The container disk looks large for an image that carries no weights, and it is
+not a mistake: `vllm/vllm-openai:v0.28.0-cu129` is 9.7 GB in the registry but
+**24.2 GB unpacked** (measured, not estimated — CUDA, PyTorch, the kernels and
+the Python stack). RunPod unpacks it onto the container disk, so anything under
+about 30 GB fails the pull. 50 GB leaves room for logs and a layer change.
 
 A single H100 80GB fits this model comfortably: 31.2 GB of FP8 weights leave
 ample room for KV cache at `MAX_MODEL_LEN=16384` and
