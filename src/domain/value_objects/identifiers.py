@@ -34,7 +34,9 @@ class EntityId:
 
     def __post_init__(self) -> None:
         if not isinstance(self.value, UUID):  # pragma: no cover - defensive
-            raise TypeError(f"{type(self).__name__} expects a UUID, got {type(self.value).__name__}")
+            raise TypeError(
+                f"{type(self).__name__} expects a UUID, got {type(self.value).__name__}"
+            )
 
     @classmethod
     def generate(cls) -> Self:
