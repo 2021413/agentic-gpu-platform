@@ -1,0 +1,8 @@
+# Local test volumes — never commit anything that looks like model weights.
+/volume/
+/runpod-volume/
+*.safetensors
+*.gguf
+
+# Metrics produced by the opt-in real-GPU validation.
+/artifacts/
