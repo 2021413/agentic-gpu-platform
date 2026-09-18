@@ -83,7 +83,11 @@ services:
       JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-120}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
       REAPER_INTERVAL_SECONDS: ${REAPER_INTERVAL_SECONDS:-15}
-      SCHEDULER_STRATEGY: ${SCHEDULER_STRATEGY:-least_loaded}
+      SCHEDULER_STRATEGY: ${SCHEDULER_STRATEGY:-least_loaded_compatible_worker}
+      # The control plane is what talks to workers, so the inference adapter is
+      # chosen here. The default stack has no GPU; switch to openai_compatible
+      # when enabling the `gpu` profile.
+      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
       MAX_PLAN_REVISIONS: ${MAX_PLAN_REVISIONS:-2}
       MAX_CODER_ITERATIONS: ${MAX_CODER_ITERATIONS:-4}
       MAX_REPAIR_ITERATIONS: ${MAX_REPAIR_ITERATIONS:-3}

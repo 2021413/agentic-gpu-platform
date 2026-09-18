@@ -6,6 +6,8 @@ touches a network, a database or a GPU.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -15,6 +17,7 @@ from domain.entities.worker import Worker
 from domain.enums import AgentRole
 from domain.value_objects.identifiers import ProjectId, WorkerId
 from domain.value_objects.worker import GpuSpec, WorkerCapabilities, WorkerEndpoint
+from infrastructure.database.engine import to_async_url
 
 
 class FakeClock:
@@ -80,3 +83,34 @@ def make_worker(
 @pytest.fixture
 def worker(now: datetime) -> Worker:
     return make_worker(now=now)
+
+
+# Pinned rather than ``latest``: the adapter relies on partial unique indexes
+# and advisory locks, which must be exercised against the deployed version.
+POSTGRES_IMAGE = os.environ.get("TEST_POSTGRES_IMAGE", "postgres:16-alpine")
+
+
+@pytest.fixture(scope="session")
+def postgres_url() -> Iterator[str]:
+    """A usable PostgreSQL, from the environment or from a throwaway container.
+
+    Defined at the root so both the adapter tests and the end-to-end scenario
+    share one container instead of starting two.
+    """
+    provided = os.environ.get("TEST_DATABASE_URL")
+    if provided:
+        yield to_async_url(provided)
+        return
+
+    postgres = pytest.importorskip(
+        "testcontainers.community.postgres", reason="testcontainers is not installed"
+    )
+    try:
+        container = postgres.PostgresContainer(POSTGRES_IMAGE, driver="asyncpg")
+        container.start()
+    except Exception as exc:  # a missing daemon, a missing image, a refused socket
+        pytest.skip(f"no PostgreSQL available: {exc}")
+    try:
+        yield str(container.get_connection_url())
+    finally:
+        container.stop()

@@ -18,6 +18,11 @@ tests/
 docs/
 *.md
 !README.md
+
+# Prompt templates are runtime data, not documentation: excluding them would
+# build an image whose agents cannot speak, and the wheel force-includes them.
+!prompts/
+!prompts/**
 .env
 .env.*
 !.env.example
