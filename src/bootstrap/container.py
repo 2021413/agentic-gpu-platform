@@ -188,7 +188,10 @@ async def build_container(
         bus: EventBus = InMemoryEventBus()
     else:
         redis = create_redis_client(settings.redis_url)
-        closers.append(redis.close)
+        # aclose() is the supported shutdown in redis>=5; close() is deprecated
+        # and would raise under the project's error-on-DeprecationWarning policy.
+        # The ignore is for the stale types-redis stubs, not for the runtime.
+        closers.append(redis.aclose)  # type: ignore[attr-defined]
         registry = RedisWorkerRegistry(redis)
         queue = RedisJobQueue(redis)
         bus = RedisEventBus(redis)
@@ -240,7 +243,10 @@ async def build_container(
         ),
     )
     reaper = ReapStaleWorkersUseCase(
-        registry=registry, clock=clock, heartbeat_timeout=settings.heartbeat_timeout
+        registry=registry,
+        clock=clock,
+        heartbeat_timeout=settings.heartbeat_timeout,
+        bus=bus,
     )
     maintenance = MaintenanceLoop(
         queue=queue,

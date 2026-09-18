@@ -142,6 +142,25 @@ async def test_a_dead_worker_releases_its_job_through_lease_expiry(platform: Pla
     assert all(not w.status.is_live for w in platform.registry.workers.values())
 
 
+async def test_reaping_a_silent_worker_is_visible_on_the_event_stream(
+    platform: Platform,
+) -> None:
+    """A fleet losing workers is exactly what an operator needs to see."""
+    await platform.add_worker()
+    reaper = ReapStaleWorkersUseCase(
+        registry=platform.registry,
+        clock=platform.clock,
+        heartbeat_timeout=timedelta(seconds=30),
+        bus=platform.bus,
+    )
+
+    platform.clock.advance(timedelta(seconds=600))
+    reaped = await reaper.execute()
+
+    assert len(reaped) == 1
+    assert "worker.unavailable" in platform.bus.names()
+
+
 async def test_an_exhausted_job_fails_its_run_instead_of_hanging(platform: Platform, project):
     await platform.add_worker()
     view = await create_run(platform, project)

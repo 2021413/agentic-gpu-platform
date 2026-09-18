@@ -48,10 +48,13 @@ class WorkerRegistry(Protocol):
 
     async def deregister(self, worker_id: WorkerId) -> None: ...
 
-    async def reap_stale(
-        self, *, now: datetime, heartbeat_timeout: timedelta
-    ) -> Sequence[WorkerId]:
+    async def reap_stale(self, *, now: datetime, heartbeat_timeout: timedelta) -> Sequence[Worker]:
         """Mark silent workers unavailable and return them.
+
+        The entities are returned rather than their ids, with their event
+        buffer undrained: marking a worker unavailable produces domain events,
+        and dropping them would make a fleet failure invisible to anyone
+        watching the stream.
 
         Their in-flight jobs are then reclaimed through lease expiry; this is
         the detection half of that mechanism.
