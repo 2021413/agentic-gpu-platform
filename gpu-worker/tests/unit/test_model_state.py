@@ -51,6 +51,17 @@ def _state(snapshot: Path, **overrides: Any) -> ModelState:
     return ModelState(**payload)
 
 
+def no_hub(_config: WorkerConfig, _previous: ModelState | None) -> None:
+    """No external source of truth, because no unit test may touch the network.
+
+    With an injected downloader there is no real repository to ask, so the
+    snapshot cannot be proven intact and the marker records that honestly
+    (``verified=False``). Tests that need an authoritative table state it
+    themselves.
+    """
+    return None
+
+
 class SpyDownloader:
     """A downloader that records its calls and follows a scripted outcome."""
 
@@ -153,7 +164,7 @@ def test_invalid_utf8_in_the_marker_is_treated_as_absent(layout: PersistentLayou
     assert read_marker(layout) is None
 
 
-@pytest.mark.parametrize("version", [0, 2, 99])
+@pytest.mark.parametrize("version", [0, 1, 99])
 def test_a_marker_of_an_unknown_version_is_treated_as_absent(
     layout: PersistentLayout, fake_snapshot: Path, version: int
 ) -> None:
@@ -265,7 +276,7 @@ def test_a_valid_marker_and_an_intact_snapshot_skip_the_download(
     write_marker(layout, _state(fake_snapshot))
     spy = SpyDownloader(outcomes=[fake_snapshot])
 
-    outcome = prepare_model(config, downloader=spy, log=recorder)
+    outcome = prepare_model(config, sizes=no_hub, downloader=spy, log=recorder)
 
     assert outcome.downloaded is False
     assert outcome.reused is True
@@ -282,7 +293,7 @@ def test_the_warm_path_does_not_even_take_the_lock(
     handle = layout.download_lock.open("a+")
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
-        outcome = prepare_model(config, downloader=_explode, log=recorder)
+        outcome = prepare_model(config, sizes=no_hub, downloader=_explode, log=recorder)
     finally:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
@@ -301,7 +312,9 @@ def test_a_marker_for_another_model_forces_a_new_preparation(
     config = make_config(model_id="acme/tiny-model")
     spy = SpyDownloader(outcomes=[fake_snapshot])
 
-    outcome = prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+    outcome = prepare_model(
+        config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+    )
 
     assert outcome.downloaded is True
     assert len(spy.calls) == 1
@@ -319,7 +332,9 @@ def test_a_failing_verification_forces_a_new_preparation(
     (fake_snapshot / "model-00001-of-00001.safetensors").write_bytes(b"\x00" * 3)
     spy = SpyDownloader(outcomes=[fake_snapshot])
 
-    outcome = prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+    outcome = prepare_model(
+        config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+    )
 
     assert outcome.downloaded is True
     assert "failed verification" in recorder.text
@@ -336,7 +351,9 @@ def test_a_cold_volume_downloads_then_writes_the_marker(
 ) -> None:
     spy = SpyDownloader(outcomes=[fake_snapshot])
 
-    outcome = prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+    outcome = prepare_model(
+        config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+    )
 
     assert outcome.downloaded is True
     assert clock.sleeps == []
@@ -351,10 +368,12 @@ def test_a_cold_volume_downloads_then_writes_the_marker(
     marker = read_marker(config.layout)
     assert marker is not None
     assert marker.model_id == "acme/tiny-model"
+    # Nothing authoritative was available, so the snapshot is recorded as
+    # unproven and will be checked again rather than trusted.
+    assert marker.verified is False
     assert marker.snapshot_path == str(fake_snapshot)
     assert marker.files == snapshot_files(fake_snapshot)
     assert marker.total_bytes == sum(snapshot_files(fake_snapshot).values())
-    assert marker.verified is True
     # An unpinned request records the commit the snapshot directory stands for.
     assert marker.revision == fake_snapshot.name
 
@@ -368,13 +387,17 @@ def test_the_pinned_revision_and_the_token_reach_the_downloader(
     config = make_config(model_revision="abc123", hf_token=Secret("hf_secret"))
     spy = SpyDownloader(outcomes=[fake_snapshot])
 
-    prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+    prepare_model(
+        config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+    )
 
     assert spy.calls[0]["revision"] == "abc123"
     assert spy.calls[0]["token"] == "hf_secret"
     marker = read_marker(config.layout)
     assert marker is not None
-    assert marker.revision == "abc123"
+    # The resolved snapshot directory, not the requested string: recording
+    # "main" would look like a pin while tracking a moving branch.
+    assert marker.revision == fake_snapshot.name
 
 
 def test_a_volume_without_room_refuses_before_downloading(
@@ -384,7 +407,9 @@ def test_a_volume_without_room_refuses_before_downloading(
     spy = SpyDownloader(outcomes=["unused"])
 
     with pytest.raises(ModelPreparationError) as caught:
-        prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+        prepare_model(
+            config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+        )
 
     assert spy.calls == []
     assert "required" in str(caught.value)
@@ -408,7 +433,9 @@ def test_two_transient_failures_are_resumed_with_exponential_backoff(
         ]
     )
 
-    outcome = prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+    outcome = prepare_model(
+        config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+    )
 
     assert outcome.downloaded is True
     assert len(spy.calls) == 3
@@ -430,7 +457,9 @@ def test_the_outcome_reports_how_many_attempts_were_really_needed(
         ]
     )
 
-    outcome = prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+    outcome = prepare_model(
+        config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+    )
 
     assert len(spy.calls) == 3
     assert outcome.attempts == 3
@@ -453,7 +482,9 @@ def test_a_full_volume_fails_immediately_without_a_single_retry(
     spy = SpyDownloader(outcomes=[failure])
 
     with pytest.raises(ModelPreparationError) as caught:
-        prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+        prepare_model(
+            config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+        )
 
     assert len(spy.calls) == 1, "a full disk must never be retried"
     assert clock.sleeps == []
@@ -470,7 +501,9 @@ def test_exhausting_the_attempts_reports_a_retryable_failure(
     spy = SpyDownloader(outcomes=[ConnectionResetError("connection reset by peer")])
 
     with pytest.raises(ModelPreparationError) as caught:
-        prepare_model(config, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep)
+        prepare_model(
+            config, sizes=no_hub, downloader=spy, log=recorder, now=clock.now, sleep=clock.sleep
+        )
 
     assert len(spy.calls) == config.download_max_attempts == 3
     assert clock.sleeps == [5.0, 10.0]
@@ -491,7 +524,9 @@ def test_a_quota_failure_wrapped_by_the_hub_client_still_stops_immediately(
         )
 
     with pytest.raises(ModelPreparationError):
-        prepare_model(config, downloader=fetch, log=recorder, now=clock.now, sleep=clock.sleep)
+        prepare_model(
+            config, sizes=no_hub, downloader=fetch, log=recorder, now=clock.now, sleep=clock.sleep
+        )
 
     assert clock.sleeps == []
 
@@ -580,7 +615,12 @@ def test_prepare_model_surfaces_a_lock_timeout(
     try:
         with pytest.raises(LockTimeoutError):
             prepare_model(
-                config, downloader=_explode, log=recorder, now=clock.now, sleep=clock.sleep
+                config,
+                sizes=no_hub,
+                downloader=_explode,
+                log=recorder,
+                now=clock.now,
+                sleep=clock.sleep,
             )
     finally:
         fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
@@ -722,7 +762,7 @@ def test_the_winner_of_the_lock_race_spares_the_loser_the_download(
     child.start()
     try:
         assert queue.get(timeout=10) == "locked"
-        outcome = prepare_model(config, downloader=_explode, log=recorder)
+        outcome = prepare_model(config, sizes=no_hub, downloader=_explode, log=recorder)
     finally:
         child.join(timeout=10)
         if child.is_alive():  # pragma: no cover - only on a failed test

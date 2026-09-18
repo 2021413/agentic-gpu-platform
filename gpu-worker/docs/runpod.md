@@ -95,9 +95,10 @@ TCP port 213.173.109.39:13007 -> :8000
 
 Two things to know:
 
-* The external port changes whenever the Pod resets. That is handled by design
-  here — the worker agent re-registers its endpoint on every boot — but any
-  client holding a hard-coded address will break.
+* The external port changes whenever the Pod resets, and **this image does
+  nothing about that**: re-registering an endpoint belongs to the control
+  plane's worker agent, a separate component. Any client holding a hard-coded
+  address will break on a reset.
 * IPs are stable on **Secure Cloud** and may change on Community Cloud if a Pod
   is migrated.
 * The port is genuinely public, so `VLLM_API_KEY` stops being optional.
@@ -170,9 +171,37 @@ throughput.
 
 ## Scaling
 
-Add a Pod. The worker registers itself with the control plane, starts
-heartbeating, and receives jobs. Remove one by draining it: it stops accepting
-work, finishes what it holds, and deregisters. Nothing restarts.
+Add a Pod, and it serves inference. That is all this image does.
+
+**Registration, heartbeats and draining are not part of it.** Those belong to
+the control plane's worker agent, which runs alongside and is documented with
+the orchestrator. Stated plainly because the two are easy to conflate:
+`grep -r heartbeat src/` in this project returns nothing.
+
+What this image guarantees is narrower and worth having on its own — a Pod that
+comes up serving the right model, on a volume that does not re-download 31 GB,
+and that refuses to claim it is ready when it is not.
+
+## Automated deployment
+
+`tools/runpod_deployer` drives all of the above through the RunPod API instead
+of the console:
+
+```bash
+export RUNPOD_API_KEY=...          # read from the environment only, no flag
+python -m tools.runpod_deployer gpu-types      # what is available, and at what price
+python -m tools.runpod_deployer deploy         # create, wait for ready, smoke test
+python -m tools.runpod_deployer status
+python -m tools.runpod_deployer smoke-test
+python -m tools.runpod_deployer destroy --yes  # never destroys without this
+```
+
+`deploy` waits for real readiness — `/v1/models` must list the served model —
+and then runs one real completion, so a Pod that comes up broken is reported as
+broken rather than as deployed. `WORKER_IMAGE` selects the image to run.
+
+The key is read from `RUNPOD_API_KEY` and nowhere else: there is no flag, no
+file path and no default, and it is redacted from every log and error.
 
 ## Why not Serverless
 

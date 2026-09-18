@@ -20,13 +20,15 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from importlib import metadata
 
-from worker.config import ConfigError, WorkerConfig
+from worker.config import ConfigError, WorkerConfig, resolve_tensor_parallel
 from worker.filesystem import StorageError, inspect_storage
 from worker.gpu import GpuSurvey, survey_gpus
 from worker.model_state import (
     ModelPreparationError,
+    ModelState,
     prepare_model,
     read_marker,
 )
@@ -122,7 +124,22 @@ def _gpu_warnings(survey: GpuSurvey, config: WorkerConfig) -> list[str]:
 
 
 # ----------------------------------------------------------------------
-def _report_model(config: WorkerConfig) -> object | None:
+def _resolve_parallelism(config: WorkerConfig) -> WorkerConfig:
+    """Apply AUTO_TENSOR_PARALLEL, which otherwise would be documented fiction.
+
+    Asking the driver belongs here rather than in ``WorkerConfig``: configuration
+    parses an environment, it does not run ``nvidia-smi``.
+    """
+    if not config.auto_tensor_parallel:
+        return config
+    survey = survey_gpus()
+    resolved = resolve_tensor_parallel(config, survey.gpus)
+    if resolved == config.tensor_parallel_size:
+        return config
+    return replace(config, tensor_parallel_size=resolved)
+
+
+def _report_model(config: WorkerConfig) -> ModelState | None:
     _rule("model")
     marker = read_marker(config.layout)
     if marker is None:
@@ -176,9 +193,12 @@ def preflight_main(argv: Sequence[str] | None = None) -> int:
     for warning in _gpu_warnings(survey, config):
         _out(f"  ! {warning}")
 
-    # Free space only blocks a cold start. A volume that already holds the model
-    # is allowed to be nearly full: nothing large is about to be written.
-    if marker is None and not report.has_enough_free:
+    # Free space only blocks a cold start. A volume that already holds *this*
+    # model is allowed to be nearly full: nothing large is about to be written.
+    # A marker for a different model or revision is not a reprieve — that is
+    # exactly the case where 31 GB is about to be downloaded.
+    resident = marker is not None and marker.matches(config.model_id, config.model_revision)
+    if not resident and not report.has_enough_free:
         _err(
             f"\n  x only {report.disk.free_gb:,.1f} GB free, "
             f"{config.min_free_disk_gb:g} GB required to download the model"
@@ -254,7 +274,7 @@ def serve_args_main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    config = _load_config()
+    config = _resolve_parallelism(_load_config())
     marker = read_marker(config.layout)
     snapshot = None
     if marker is not None and marker.matches(config.model_id, config.model_revision):

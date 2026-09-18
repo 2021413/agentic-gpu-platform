@@ -314,17 +314,26 @@ class WorkerConfig:
             # A local snapshot already *is* the revision; asking vLLM to resolve
             # one again would send it back to the hub for no reason.
             argv += ["--revision", self.model_revision]
-        if self.vllm_api_key:
-            argv += ["--api-key", self.vllm_api_key.reveal()]
+        # The API key is deliberately NOT passed as an argument. vLLM reads
+        # VLLM_API_KEY from the environment, and an argument would put the secret
+        # in /proc/1/cmdline for anything that can read the process table, and in
+        # whatever file the vector is marshalled through on its way to exec.
         argv += list(self.extra_args)
         return argv
 
     def redacted_argv(self, model_path: str | Path | None = None) -> list[str]:
-        """The same vector, safe to log."""
+        """The same vector, safe to log.
+
+        The key never reaches argv on its own, but an operator may still have
+        written one into VLLM_EXTRA_ARGS, so the value after any ``--api-key``
+        is masked wherever it came from.
+        """
         argv = self.vllm_argv(model_path)
-        if self.vllm_api_key:
-            index = argv.index("--api-key")
-            argv[index + 1] = "***"
+        for index, word in enumerate(argv):
+            if word == "--api-key" and index + 1 < len(argv):
+                argv[index + 1] = "***"
+            elif word.startswith("--api-key="):
+                argv[index] = "--api-key=***"
         return argv
 
     # -- construction ---------------------------------------------------

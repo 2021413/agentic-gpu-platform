@@ -85,29 +85,50 @@ def test_a_warm_restart_reuses_the_volume_without_downloading(
     assert outcome.downloaded is False
 
 
-def test_a_truncated_shard_is_detected_and_completed(config: WorkerConfig) -> None:
-    """A killed download leaves short files; verification must notice."""
+def test_a_truncated_shard_is_repaired_against_the_hub(config: WorkerConfig) -> None:
+    """A killed download leaves short files; they must come back, not be blessed.
+
+    The assertion deliberately compares against the size captured *before* the
+    corruption. An earlier version of this test verified the repaired snapshot
+    against sizes recomputed from that same snapshot, so it passed while the
+    truncated length was quietly recorded as correct — the test was tautological
+    and hid a defect that would have served corrupt weights to vLLM.
+    """
     first = prepare_model(config, log=lambda _m: None)
     snapshot = Path(first.state.snapshot_path)
 
-    victim = next(path for path in snapshot.rglob("*") if path.is_file() and path.stat().st_size)
-    # Truncate through the symlink so the blob itself shrinks, which is exactly
-    # what an interrupted transfer leaves behind.
-    resolved = victim.resolve()
-    original = resolved.stat().st_size
-    with resolved.open("r+b") as handle:
-        handle.truncate(max(original // 2, 1))
+    victim = max(
+        (path for path in snapshot.rglob("*") if path.is_file()),
+        key=lambda path: path.stat().st_size,
+    )
+    blob = victim.resolve()
+    original_size = blob.stat().st_size
+    os.chmod(blob, 0o644)
+    with blob.open("r+b") as handle:
+        handle.truncate(original_size // 2)
+    assert (snapshot / victim.name).stat().st_size != original_size
 
+    prepare_model(config, log=lambda _m: None)
+
+    assert (snapshot / victim.name).stat().st_size == original_size, (
+        "the truncated file was not restored"
+    )
     marker = read_marker(config.layout)
     assert marker is not None
-    ok, problems = verify_snapshot(snapshot, marker.files)
-    assert not ok
-    assert any("truncated" in problem for problem in problems)
+    assert marker.verified is True
+    assert marker.files[victim.name] == original_size, (
+        "the marker recorded the truncated length as if it were correct"
+    )
 
-    repaired = prepare_model(config, log=lambda _m: None)
-    assert repaired.downloaded is True
-    ok, problems = verify_snapshot(Path(repaired.state.snapshot_path), repaired.state.files)
-    assert ok, problems
+
+def test_a_pinned_revision_is_recorded_as_the_resolved_commit(
+    config: WorkerConfig,
+) -> None:
+    """A marker saying 'main' would be an apparent pin on a moving branch."""
+    outcome = prepare_model(config, log=lambda _m: None)
+
+    assert len(outcome.state.revision) == 40, outcome.state.revision
+    assert all(character in "0123456789abcdef" for character in outcome.state.revision)
 
 
 def test_the_marker_survives_a_process_restart(config: WorkerConfig) -> None:

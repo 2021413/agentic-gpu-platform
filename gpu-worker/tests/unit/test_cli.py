@@ -382,31 +382,38 @@ def test_serve_args_falls_back_to_the_repository_when_the_marker_is_stale(
     assert printed[printed.index("--revision") + 1] == "abc123"
 
 
-def test_serve_args_redacts_the_key_but_nothing_else(
+def test_serve_args_redacts_a_key_written_into_extra_args(
     env: Callable[..., None], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    env(VLLM_API_KEY=API_KEY, VLLM_EXTRA_ARGS="--enable-prefix-caching")
+    """The worker no longer passes a key itself, but an operator still might."""
+    env(VLLM_EXTRA_ARGS=f"--api-key {API_KEY}")
 
     assert run(cli.serve_args_main, ["--redacted"]) == cli.EXIT_OK
 
     captured = capsys.readouterr()
     printed = argv_of(captured.out)
     assert API_KEY not in captured.out
-    assert API_KEY not in captured.err
     assert printed[printed.index("--api-key") + 1] == "***"
-    assert printed[-1] == "--enable-prefix-caching"
+    assert printed[:3] == ["vllm", "serve", MODEL]
 
 
-def test_serve_args_without_redaction_emits_the_real_key_for_the_entrypoint(
+def test_serve_args_never_emits_the_api_key(
     env: Callable[..., None], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The unredacted vector is what ``exec`` needs; ``--redacted`` is for logs."""
+    """The key reaches vLLM through the environment, never through argv.
+
+    An argument would put the secret in /proc/1/cmdline for anything that can
+    read the process table, and in whatever file the vector is marshalled
+    through on its way to exec.
+    """
     env(VLLM_API_KEY=API_KEY)
 
     assert run(cli.serve_args_main) == cli.EXIT_OK
 
-    printed = argv_of(capsys.readouterr().out)
-    assert printed[printed.index("--api-key") + 1] == API_KEY
+    captured = capsys.readouterr()
+    assert API_KEY not in captured.out
+    assert API_KEY not in captured.err
+    assert "--api-key" not in argv_of(captured.out)
 
 
 def test_serve_args_rejects_a_broken_configuration_with_code_2(env: Callable[..., None]) -> None:

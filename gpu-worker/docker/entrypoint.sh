@@ -231,8 +231,15 @@ stage "vLLM START"
 #     two, exec'ing vLLM with arguments nobody wrote. NUL is the one byte an
 #     argv word cannot contain.
 #   * `$(...)` silently drops NUL bytes, so the vector goes through a file.
-serve_args_file="$(mktemp)"
-trap 'rm -f "${serve_args_file}"' EXIT
+# Not $(mktemp): TMPDIR points at the persistent network volume, so a default
+# temporary file would be written to storage shared by every Pod that mounts it.
+# And an EXIT trap would never fire — `exec` replaces this shell without running
+# one (verified: `bash -c 'trap "echo x" EXIT; exec /bin/true'` prints nothing).
+# The file is therefore created private, in memory, and unlinked the moment it
+# has been read.
+serve_args_file="$(mktemp -p "${WORKER_RUNTIME_TMP:-/dev/shm}" serve-args.XXXXXX 2>/dev/null \
+                  || mktemp -p /tmp serve-args.XXXXXX)"
+chmod 600 "${serve_args_file}"
 serve_args_rc=0
 worker-serve-args > "${serve_args_file}" || serve_args_rc=$?
 if ((serve_args_rc != 0)); then
@@ -242,6 +249,8 @@ if ((serve_args_rc != 0)); then
 fi
 
 mapfile -d '' -t vllm_argv < "${serve_args_file}"
+# Unlinked immediately, not at exit: `exec` never returns here.
+rm -f "${serve_args_file}"
 if ((${#vllm_argv[@]} < 2)) || [[ -z ${vllm_argv[0]} ]]; then
     fail "worker-serve-args produced no argument vector"
     explain "${EXIT_CONFIG}"
