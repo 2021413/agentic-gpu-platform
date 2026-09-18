@@ -7,6 +7,8 @@ candidates that already build and pass their tests.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 
 from domain.entities.base import Entity
@@ -20,6 +22,7 @@ from domain.events.run import (
 from domain.exceptions import CandidateError, InvalidStateTransitionError
 from domain.value_objects.identifiers import CandidateId, JobId, RunId, WorkerId, WorkspaceId
 from domain.value_objects.patch import Patch
+from domain.value_objects.tools import ToolResult
 from domain.value_objects.validation import ValidationReport
 
 __all__ = ["Candidate"]
@@ -235,18 +238,38 @@ class Candidate(Entity):
         self._status = CandidateStatus.VALIDATING
         self.record(ValidationStarted(occurred_at=now, run_id=self._run_id, candidate_id=self._id))
 
-    def record_validation(self, *, report: ValidationReport, now: datetime) -> None:
+    def append_validation(self, *, results: Sequence[ToolResult], now: datetime) -> None:
+        """Accumulate the results of one deterministic stage.
+
+        Validation is several jobs — build, then tests, then static analysis —
+        so the report grows stage by stage and is only closed by
+        ``record_validation``. Appending keeps the candidate in VALIDATING.
+        """
+        del now  # the timestamps live on the tool results themselves
+        if self._status is not CandidateStatus.VALIDATING:
+            raise InvalidStateTransitionError("Candidate", self._status, CandidateStatus.VALIDATING)
+        self._validation = self._validation.extended_with(results)
+
+    def record_validation(
+        self,
+        *,
+        now: datetime,
+        report: ValidationReport | None = None,
+        static_analysis_is_blocking: bool = False,
+    ) -> None:
+        """Close validation on the accumulated evidence."""
         if self._status is not CandidateStatus.VALIDATING:
             raise InvalidStateTransitionError("Candidate", self._status, CandidateStatus.VALIDATED)
-        self._validation = report
+        final = report if report is not None else self._validation
+        self._validation = replace(final, static_analysis_is_blocking=static_analysis_is_blocking)
         self._status = CandidateStatus.VALIDATED
         self.record(
             ValidationCompleted(
                 occurred_at=now,
                 run_id=self._run_id,
                 candidate_id=self._id,
-                viable=report.is_viable,
-                summary=report.summary(),
+                viable=self._validation.is_viable,
+                summary=self._validation.summary(),
             )
         )
 
