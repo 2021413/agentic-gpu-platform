@@ -28,8 +28,8 @@ jobs:
       run:
         working-directory: gpu-worker
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
@@ -43,7 +43,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: resolve the version
         id: version
@@ -80,14 +80,14 @@ jobs:
                       /usr/local/share/boost /usr/share/swift || true
           sudo docker image prune -af || true
           df -h / | tail -1
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: gpu-worker
           file: gpu-worker/Dockerfile

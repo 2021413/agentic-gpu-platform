@@ -26,8 +26,8 @@ jobs:
     name: lint and types
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -41,8 +41,8 @@ jobs:
     name: unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -59,8 +59,8 @@ jobs:
     name: CPU-only bootstrap
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install -e .
@@ -93,7 +93,7 @@ jobs:
     name: build and inspect the image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
       - name: make room for a 24 GB image
         # A standard ubuntu-latest runner offers about 14 GB free, and this
@@ -109,7 +109,7 @@ jobs:
           sudo docker image prune -af || true
           df -h / | tail -1
       - name: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: gpu-worker
           file: gpu-worker/Dockerfile
