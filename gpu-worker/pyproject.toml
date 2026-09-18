@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-gpu-worker"
+version = "1.0.0"
+description = "Reproducible RunPod GPU worker image serving Qwen3-Coder through vLLM"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+# Deliberately thin. The base image already carries vLLM, PyTorch and CUDA;
+# reinstalling any of them would break the very pinning that makes this image
+# reproducible.
+dependencies = [
+    "httpx>=0.28",
+    "huggingface-hub>=0.35",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "respx>=0.22",
+]
+
+[project.scripts]
+worker-preflight = "worker.cli:preflight_main"
+worker-prepare-model = "worker.cli:prepare_main"
+worker-ready = "worker.cli:ready_main"
+worker-health = "worker.cli:health_main"
+worker-smoke-test = "worker.cli:smoke_main"
+worker-serve-args = "worker.cli:serve_args_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/worker", "tools/runpod_deployer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tools", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TID", "RUF", "ASYNC", "PL", "S"]
+ignore = [
+    "PLR0913",  # constructor injection is deliberate
+    "S603",     # subprocess calls are argument vectors, never a shell
+    "S607",     # nvidia-smi and friends are resolved from PATH on purpose
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101", "S105", "S106"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["worker", "runpod_deployer"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src:tools"
+packages = ["worker", "runpod_deployer"]
+strict = true
+warn_unreachable = true
+plugins = []
+
+[[tool.mypy.overrides]]
+module = ["huggingface_hub.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src", "tools", "."]
+markers = [
+    "integration: needs a running vLLM or a container runtime",
+    "gpu: needs a real GPU and is never run in normal CI",
+    "runpod: provisions a real RunPod Pod and costs money",
+]
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["src", "tools"]
+branch = true
