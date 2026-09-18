@@ -1,0 +1,26 @@
+# Dependency updates. Grouped and monthly: a coding platform should not spend
+# its review budget on one pull request per patch release.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    # Base images referenced by the Dockerfiles (python:3.12-slim, vLLM).
+    directory: "/docker"
+    schedule:
+      interval: monthly

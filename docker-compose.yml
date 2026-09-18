@@ -1,0 +1,183 @@
+# ---------------------------------------------------------------------------
+# Local development stack.
+#
+#   docker compose up -d                 # API + Postgres + Redis + fake worker
+#   docker compose --profile gpu up -d   # additionally: a real vLLM GPU worker
+#
+# THE DEFAULT STACK NEEDS NO GPU (spec section 23): the `worker-fake` service
+# runs the same worker agent with a deterministic fake LLM adapter.
+#
+# Configuration is read from ./.env (see .env.example); every value below also
+# has an inline default, so `docker compose config` works on a fresh clone.
+# Values set here override .env where the container network differs from the
+# host (service names instead of localhost).
+# ---------------------------------------------------------------------------
+
+name: agentic-gpu-platform
+
+services:
+  # --- durable state -------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentic}
+      POSTGRES_DB: ${POSTGRES_DB:-agentic}
+      # Deterministic collation, so ordering never depends on the host locale.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentic} -d ${POSTGRES_DB:-agentic}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # --- registry, queue, event fan-out --------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly keeps the queue across a restart; run state still lives in
+    # PostgreSQL (spec section 14), Redis is never the durable source.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  # --- control plane + orchestrator ----------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: agentic-api:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql+asyncpg://${POSTGRES_USER:-agentic}:${POSTGRES_PASSWORD:-agentic}@postgres:5432/${POSTGRES_DB:-agentic}}
+      REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379/0}
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token-change-me}
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-console}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-10}
+      HEARTBEAT_TIMEOUT_SECONDS: ${HEARTBEAT_TIMEOUT_SECONDS:-45}
+      LLM_REQUEST_TIMEOUT_SECONDS: ${LLM_REQUEST_TIMEOUT_SECONDS:-600}
+      JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-120}
+      JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
+      REAPER_INTERVAL_SECONDS: ${REAPER_INTERVAL_SECONDS:-15}
+      SCHEDULER_STRATEGY: ${SCHEDULER_STRATEGY:-least_loaded}
+      MAX_PLAN_REVISIONS: ${MAX_PLAN_REVISIONS:-2}
+      MAX_CODER_ITERATIONS: ${MAX_CODER_ITERATIONS:-4}
+      MAX_REPAIR_ITERATIONS: ${MAX_REPAIR_ITERATIONS:-3}
+      MAX_PARALLEL_CANDIDATES: ${MAX_PARALLEL_CANDIDATES:-3}
+      WORKSPACE_ROOT: /var/lib/agentic/workspaces
+      ARTIFACT_ROOT: /var/lib/agentic/artifacts
+    ports:
+      - "${API_PUBLISHED_PORT:-8000}:8000"
+    volumes:
+      - agentic-state:/var/lib/agentic
+    # Health is the HEALTHCHECK declared in docker/api.Dockerfile (GET /health);
+    # `condition: service_healthy` below relies on it.
+
+  # --- CPU-only worker, deterministic fake LLM (spec section 45) -----------
+  worker-fake:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: agentic-api:dev
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    # Same distribution, other console script (pyproject: worker_agent.main:main).
+    command: ["agentic-worker"]
+    environment:
+      CONTROL_PLANE_URL: http://api:8000
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token-change-me}
+      WORKER_ENDPOINT: http://worker-fake:9000
+      WORKER_PORT: "9000"
+      # No GPU, no weights: the fake adapter answers planner/coder/reviewer
+      # prompts deterministically.
+      LLM_PROVIDER: fake
+      MODEL_ID: ${FAKE_MODEL_ID:-fake-coder-1}
+      MODEL_CONTEXT_LENGTH: ${FAKE_MODEL_CONTEXT_LENGTH:-32768}
+      WORKER_CONCURRENCY: ${FAKE_WORKER_CONCURRENCY:-4}
+      WORKER_ROLES: ${WORKER_ROLES:-PLANNER,CODER,REVIEWER}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-console}
+    volumes:
+      - agentic-state:/var/lib/agentic
+    # Scale it to prove multi-worker scheduling (spec acceptance criteria 5-6):
+    #   docker compose up -d --scale worker-fake=2
+    # Scaling requires WORKER_ENDPOINT/WORKER_ID to be per-instance; see
+    # docs/development.md for the two supported ways to do it.
+
+  # --- real GPU worker, opt-in --------------------------------------------
+  worker-gpu:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+      args:
+        VLLM_IMAGE: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    image: agentic-worker-gpu:dev
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      CONTROL_PLANE_URL: http://api:8000
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token-change-me}
+      WORKER_ENDPOINT: ${WORKER_ENDPOINT:-http://worker-gpu:9000}
+      WORKER_PORT: "9000"
+      LLM_PROVIDER: vllm
+      MODEL_ID: ${MODEL_ID:-Qwen/Qwen3-Coder-30B-A3B-Instruct}
+      MODEL_CONTEXT_LENGTH: ${MODEL_CONTEXT_LENGTH:-131072}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      WORKER_ROLES: ${WORKER_ROLES:-PLANNER,CODER,REVIEWER}
+      VLLM_PORT: ${VLLM_PORT:-8001}
+      TENSOR_PARALLEL_SIZE: ${TENSOR_PARALLEL_SIZE:-1}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.90}
+      VLLM_EXTRA_ARGS: ${VLLM_EXTRA_ARGS:-}
+      HF_HOME: /models/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # Weights stay out of the image and survive `docker compose down`.
+      - hf-cache:/models/huggingface
+      - agentic-state:/var/lib/agentic
+    # vLLM needs a large /dev/shm for tensor-parallel communication.
+    shm_size: "8gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+
+volumes:
+  postgres-data:
+  redis-data:
+  agentic-state:
+  hf-cache:
