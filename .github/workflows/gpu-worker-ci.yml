@@ -1,0 +1,147 @@
+name: gpu-worker CI
+
+# Normal CI never needs a GPU and never downloads the model. Both are explicit
+# acceptance criteria: a pipeline that needs an H100 is a pipeline nobody runs.
+on:
+  push:
+    branches: [main]
+    paths: ["gpu-worker/**", ".github/workflows/gpu-worker-ci.yml"]
+  pull_request:
+    paths: ["gpu-worker/**"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: gpu-worker
+
+concurrency:
+  group: gpu-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: gpu-worker/pyproject.toml
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tools tests
+      - run: ruff format --check src tools tests
+      - run: mypy src/worker tools
+
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: gpu-worker/pyproject.toml
+      - run: pip install -e ".[dev]"
+      - name: run the suite that needs no GPU, no network and no container
+        run: pytest tests -q -m "not gpu and not runpod and not integration" --cov=worker --cov=runpod_deployer --cov-report=term-missing
+      - name: the deployer must skip cleanly without credentials
+        # A real-GPU test that runs by accident provisions an H100 and bills for
+        # it, so "skipped" here is a behaviour worth asserting.
+        run: pytest tests -q -m runpod -rs | tee /tmp/runpod.txt && grep -qiE "no tests ran|skipped" /tmp/runpod.txt
+
+  bootstrap:
+    name: CPU-only bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -e .
+      - name: preflight reports a GPU-less host without crashing
+        run: |
+          WORKER_ALLOW_EPHEMERAL_STORAGE=1 PERSISTENT_ROOT="$RUNNER_TEMP/volume" \
+            worker-preflight
+      - name: a missing volume fails with exit code 3
+        run: |
+          set +e
+          PERSISTENT_ROOT="$RUNNER_TEMP/absent" worker-preflight
+          code=$?
+          set -e
+          test "$code" -eq 3 || { echo "expected exit 3, got $code"; exit 1; }
+      - name: an invalid configuration fails with exit code 2
+        run: |
+          set +e
+          MAX_MODEL_LEN=10 worker-preflight
+          code=$?
+          set -e
+          test "$code" -eq 2 || { echo "expected exit 2, got $code"; exit 1; }
+      - name: the argument vector is one word per line and carries no secret
+        run: |
+          WORKER_ALLOW_EPHEMERAL_STORAGE=1 PERSISTENT_ROOT="$RUNNER_TEMP/volume" \
+            VLLM_API_KEY=not-a-real-key worker-serve-args --redacted | tee /tmp/argv.txt
+          grep -q -- "--api-key" /tmp/argv.txt
+          ! grep -q "not-a-real-key" /tmp/argv.txt
+
+  image:
+    name: build and inspect the image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: make room for a 24 GB image
+        # A standard ubuntu-latest runner offers about 14 GB free, and this
+        # image unpacks to 24.2 GB. Without this the build dies on ENOSPC after
+        # pulling most of the base. Removing the preinstalled toolchains we do
+        # not use frees roughly 25-30 GB. Written inline rather than pulled from
+        # a third-party action: this runs with a token that can publish packages.
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/share/swift || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+      - name: build
+        uses: docker/build-push-action@v6
+        with:
+          context: gpu-worker
+          file: gpu-worker/Dockerfile
+          push: false
+          load: true
+          tags: agentic-gpu-worker:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: no model weight may exist in any layer
+        # The invariant the whole design rests on. Checked mechanically, because
+        # a COPY added in a hurry is exactly how 31 GB ends up in an image.
+        run: |
+          docker create --name inspect agentic-gpu-worker:ci
+          docker export inspect | tar -tv > /tmp/layers.txt || true
+          docker rm inspect
+          if grep -qE "\.safetensors|\.gguf|\.bin$" /tmp/layers.txt; then
+            echo "model weights found inside the image:"
+            grep -E "\.safetensors|\.gguf|\.bin$" /tmp/layers.txt | head
+            exit 1
+          fi
+          echo "no model weights in the image"
+      - name: cache paths point at the persistent volume
+        run: |
+          docker inspect agentic-gpu-worker:ci --format '{{json .Config.Env}}' > /tmp/env.json
+          for key in HF_HOME HF_HUB_CACHE VLLM_CACHE_ROOT TORCH_HOME TMPDIR; do
+            grep -q "\"$key=/runpod-volume" /tmp/env.json \
+              || { echo "$key does not point at /runpod-volume"; cat /tmp/env.json; exit 1; }
+          done
+      - name: the image refuses to boot without a volume
+        run: |
+          set +e
+          docker run --rm --entrypoint worker-preflight agentic-gpu-worker:ci
+          code=$?
+          set -e
+          test "$code" -eq 3 || { echo "expected exit 3 without a volume, got $code"; exit 1; }

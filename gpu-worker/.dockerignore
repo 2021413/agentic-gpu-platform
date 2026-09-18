@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Build context: small, deterministic, and containing exactly what the image
+# needs — no more, no less.
+#
+# The build needs, and MUST keep:
+#   pyproject.toml   the package metadata
+#   README.md        hatchling reads `readme = "README.md"`; the wheel build
+#                    fails outright with "Readme file does not exist" without it
+#   src/             the worker package itself
+#   docker/*.sh      the lifecycle scripts
+#
+# Everything else is excluded. Anything that ends up here also ends up in the
+# daemon's context tarball and busts the layer cache on every unrelated change.
+# ---------------------------------------------------------------------------
+
+# -- version control --------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+
+# -- virtualenvs and Python build artefacts ---------------------------------
+# .venv is the biggest single item in this tree and would be copied wholesale.
+.venv
+venv
+env
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.eggs
+build
+dist
+wheels
+
+# -- tool caches ------------------------------------------------------------
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov
+.tox
+.nox
+.hypothesis
+
+# -- not needed at runtime --------------------------------------------------
+# Tests run in CI against the source tree, never inside the worker image; the
+# deployer in tools/ drives RunPod from the outside and has no business being
+# shipped to the GPU.
+tests
+docs
+tools
+Makefile
+
+# -- local configuration and secrets ----------------------------------------
+# .env holds real tokens. It must never reach a layer or a registry;
+# configuration is injected at runtime by the Pod template.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# -- editor and OS noise ----------------------------------------------------
+.idea
+.vscode
+*.swp
+.DS_Store
+
+# -- model data, defensively -------------------------------------------------
+# Nothing here should ever exist in the source tree, but if a stray download
+# lands in it, these patterns keep 31.2 GB out of the build context and out of
+# any layer. The Dockerfile also fails the build if weights appear in the image.
+*.safetensors
+*.gguf
+*.pt
+*.bin
+models
+runpod-volume
+
+# -- the artefacts the Dockerfile itself produces ---------------------------
+Dockerfile
+.dockerignore
