@@ -12,7 +12,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID
 
 from application.dto.agent_io import CodeDraft, FindingDraft, PlanDraft, ReviewDraft, TaskDraft
@@ -708,11 +708,32 @@ class FakeWorkspaceManager:
 
 
 class FakeToolExecutor:
-    """Returns scripted exit codes per tool, defaulting to success."""
+    """Returns scripted exit codes per tool, defaulting to success.
+
+    Doubles as its own factory: which tools exist depends on the project's
+    toolchain, exactly as the real registry does, so a project with no test
+    command really has no ``run_tests`` tool to call.
+    """
+
+    STAGE_TOOLS: ClassVar[Mapping[str, str]] = {
+        "build": "build_command",
+        "run_tests": "test_command",
+        "static_analysis": "static_analysis_command",
+    }
 
     def __init__(self, exit_codes: Mapping[str, int] | None = None) -> None:
         self.exit_codes = dict(exit_codes or {})
         self.invocations: list[ToolInvocation] = []
+
+    def for_project(self, project: Project, *, role: AgentRole) -> FakeToolExecutor:
+        return self
+
+    def available_tools(self, project: Project, *, role: AgentRole) -> Sequence[str]:
+        return tuple(
+            name
+            for name, attribute in self.STAGE_TOOLS.items()
+            if getattr(project.toolchain, attribute)
+        )
 
     async def execute(
         self, *, invocation: ToolInvocation, workspace: WorkspaceHandle
