@@ -70,31 +70,6 @@ LABEL org.opencontainers.image.title="agentic-gpu-worker" \
       ai.agentic.worker.model-weights-baked="false" \
       ai.agentic.worker.persistent-root="/runpod-volume"
 
-# ---------------------------------------------------------------------------
-# Cache redirection.
-#
-# These MUST be in the image ENV and not merely exported by entrypoint.sh:
-# `huggingface_hub` and `torch` read them at IMPORT time, so any Python process
-# started by an operator (`docker exec ... python -c "import torch"`), by the
-# HEALTHCHECK, or by vLLM itself would otherwise write gigabytes of compiled
-# kernels and hub blobs into the container filesystem — the exact failure this
-# image exists to prevent.
-#
-# The values are PersistentLayout.environment() evaluated at the default root
-# (src/worker/config.py). If PERSISTENT_ROOT is changed at runtime,
-# entrypoint.sh re-derives all of them from the same Python source of truth
-# before anything heavy is imported.
-# ---------------------------------------------------------------------------
-ENV PERSISTENT_ROOT=/runpod-volume \
-    HF_HOME=/runpod-volume/huggingface \
-    HUGGINGFACE_HUB_CACHE=/runpod-volume/huggingface/hub \
-    HF_HUB_CACHE=/runpod-volume/huggingface/hub \
-    VLLM_CACHE_ROOT=/runpod-volume/vllm \
-    TORCH_HOME=/runpod-volume/torch \
-    TMPDIR=/runpod-volume/tmp \
-    XDG_CACHE_HOME=/runpod-volume/xdg \
-    TRITON_CACHE_DIR=/runpod-volume/vllm/triton
-
 # Serving defaults, identical to the ones in src/worker/config.py. Repeated
 # here only so that `docker inspect` answers "what does this image serve and
 # where does it listen" without starting it.
@@ -122,7 +97,7 @@ RUN set -eux; \
     echo "dependencies missing from the base image:${missing:- none}"; \
     if [ -n "${missing}" ]; then pip install --no-cache-dir ${missing}; fi; \
     pip install --no-cache-dir --no-deps /opt/worker; \
-    rm -rf /root/.cache/pip; \
+    rm -rf /root/.cache/pip "${XDG_CACHE_HOME:-/root/.cache}"; \
     python3 -c 'import worker, httpx, huggingface_hub; print("worker", worker.__version__)'; \
     for command in worker-preflight worker-prepare-model worker-serve-args \
                    worker-ready worker-health worker-smoke-test; do \
@@ -134,10 +109,53 @@ RUN set -eux; \
 # the mount point was not accidentally materialised (an existing empty
 # /runpod-volume turns "the volume failed to attach" into a silent 31 GB
 # download onto the ephemeral container disk).
+#
+# The 64 MB floor is not a loophole. `compressed_tensors`, a vLLM dependency,
+# ships a 1.4 MB hadamards.safetensors of Hadamard matrices; matching on the
+# extension alone failed every build on every machine. A shard of this model is
+# 10 GB, and no model worth guarding against fits under 64 MB.
 RUN set -eux; \
-    found="$(find / -xdev \( -name '*.safetensors' -o -name '*.gguf' \) -print -quit)"; \
-    if [ -n "${found}" ]; then echo "model weights in a layer: ${found}" >&2; exit 1; fi; \
-    if [ -e /runpod-volume ]; then echo "/runpod-volume must not exist in the image" >&2; exit 1; fi
+    found="$(find / -xdev \( -name '*.safetensors' -o -name '*.gguf' -o -name '*.pt' \) \
+             -size +64M -printf '%s\t%p\n' | head -5)"; \
+    if [ -n "${found}" ]; then \
+        echo "model weights in a layer:" >&2; echo "${found}" >&2; exit 1; \
+    fi; \
+    if [ -e /runpod-volume ]; then \
+        echo "/runpod-volume must not exist in the image: an empty mount point" >&2; \
+        echo "turns a volume that failed to attach into a silent 31 GB download" >&2; \
+        find /runpod-volume | head -20 >&2; exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Cache redirection.
+#
+# Deliberately AFTER the pip install. pip honours XDG_CACHE_HOME even under
+# --no-cache-dir, so declaring these earlier made the build itself create
+# /runpod-volume/xdg/pip and ship 920 KB of pip cache inside the image — the
+# exact "an empty /runpod-volume already exists" failure the guard below is
+# there to catch. The build was right to refuse; the cause was this ordering.
+#
+# These MUST be in the image ENV and not merely exported by entrypoint.sh:
+# `huggingface_hub` and `torch` read them at IMPORT time, so any Python process
+# started by an operator (`docker exec ... python -c "import torch"`), by the
+# HEALTHCHECK, or by vLLM itself would otherwise write gigabytes of compiled
+# kernels and hub blobs into the container filesystem — the exact failure this
+# image exists to prevent.
+#
+# The values are PersistentLayout.environment() evaluated at the default root
+# (src/worker/config.py). If PERSISTENT_ROOT is changed at runtime,
+# entrypoint.sh re-derives all of them from the same Python source of truth
+# before anything heavy is imported.
+# ---------------------------------------------------------------------------
+ENV PERSISTENT_ROOT=/runpod-volume \
+    HF_HOME=/runpod-volume/huggingface \
+    HUGGINGFACE_HUB_CACHE=/runpod-volume/huggingface/hub \
+    HF_HUB_CACHE=/runpod-volume/huggingface/hub \
+    VLLM_CACHE_ROOT=/runpod-volume/vllm \
+    TORCH_HOME=/runpod-volume/torch \
+    TMPDIR=/runpod-volume/tmp \
+    XDG_CACHE_HOME=/runpod-volume/xdg \
+    TRITON_CACHE_DIR=/runpod-volume/vllm/triton
 
 # The lifecycle scripts. Installed on PATH so an operator can run any single
 # stage by hand: `docker exec <pod> smoke-test.sh`. The pip console scripts
