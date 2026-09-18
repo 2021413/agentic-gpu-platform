@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from types import TracebackType
 from typing import Protocol, runtime_checkable
 
 from domain.entities.candidate import Candidate
@@ -154,7 +155,16 @@ class UnitOfWork(Protocol):
     events: EventStore
 
     async def __aenter__(self) -> UnitOfWork: ...
-    async def __aexit__(self, *exc_info: object) -> None: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Leaving without ``commit`` rolls back, events included."""
+        ...
+
     async def commit(self) -> None: ...
     async def rollback(self) -> None: ...
 

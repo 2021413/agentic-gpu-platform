@@ -23,7 +23,7 @@ from datetime import timedelta
 from application.dto.agent_io import CodeDraft, PlanDraft, ReviewDraft, format_findings
 from application.orchestration.agents import CoderAgent, PlannerAgent, ReviewerAgent
 from application.orchestration.worker_pool import WorkerPool
-from application.ports import RunCoordinator, UnitOfWorkFactory
+from application.ports import RunCoordinator, ToolExecutorFactory, UnitOfWorkFactory
 from application.services.event_publisher import commit_and_publish
 from domain.entities.candidate import Candidate
 from domain.entities.job import Job
@@ -55,7 +55,6 @@ from domain.ports.event_bus import EventBus
 from domain.ports.job_queue import JobQueue
 from domain.ports.repositories import UnitOfWork
 from domain.ports.repository_context import ContextRequest, RepositoryContextProvider
-from domain.ports.tools import ToolExecutor
 from domain.ports.workspace import WorkspaceManager
 from domain.services.candidate_selection import DeterministicCandidateSelectionPolicy
 from domain.services.retry_policy import RetryPolicy
@@ -86,9 +85,11 @@ _VALIDATION_STAGES: tuple[JobType, ...] = (
     JobType.STATIC_ANALYSIS,
 )
 
+# The tool for a stage exists only when the project configures that command,
+# which is why a missing tool means "skipped" rather than "failed".
 _STAGE_TOOLS: dict[JobType, tuple[str, ToolKind]] = {
     JobType.BUILD: ("build", ToolKind.BUILD),
-    JobType.TEST: ("test", ToolKind.TEST),
+    JobType.TEST: ("run_tests", ToolKind.TEST),
     JobType.STATIC_ANALYSIS: ("static_analysis", ToolKind.STATIC_ANALYSIS),
 }
 
@@ -116,7 +117,7 @@ class RunOrchestrator:
         pool: WorkerPool,
         coordinator: RunCoordinator,
         workspaces: WorkspaceManager,
-        tools: ToolExecutor,
+        tools: ToolExecutorFactory,
         context: RepositoryContextProvider,
         planner: PlannerAgent,
         coder: CoderAgent,
@@ -389,18 +390,18 @@ class RunOrchestrator:
 
         workspace = await self._require_workspace(candidate)
         tool_name, kind = _STAGE_TOOLS[job.type]
-        command = _stage_command(project, job.type)
-        if command is None:
-            # Nothing configured for this stage: skipping is honest, and the
+        executor = self._tools.for_project(project, role=AgentRole.CODER)
+        available = set(self._tools.available_tools(project, role=AgentRole.CODER))
+        if tool_name not in available:
+            # The project configures no such command. Skipping is honest; the
             # report records "skipped" rather than a fabricated pass.
             results: Sequence[ToolResult] = ()
         else:
             results = [
-                await self._tools.execute(
+                await executor.execute(
                     invocation=ToolInvocation(
                         tool=tool_name,
                         kind=kind,
-                        arguments={"command": command},
                         limits=ExecutionLimits(
                             timeout_seconds=self._config.validation_timeout_seconds
                         ),
@@ -867,13 +868,15 @@ def _has_unfinished(jobs: Sequence[Job]) -> bool:
     return any(not job.status.is_terminal for job in jobs)
 
 
-def _stage_command(project: Project, stage: JobType) -> str | None:
+def _stage_is_configured(project: Project, stage: JobType) -> bool:
     toolchain = project.toolchain
-    return {
-        JobType.BUILD: toolchain.build_command,
-        JobType.TEST: toolchain.test_command,
-        JobType.STATIC_ANALYSIS: toolchain.static_analysis_command,
-    }.get(stage)
+    return bool(
+        {
+            JobType.BUILD: toolchain.build_command,
+            JobType.TEST: toolchain.test_command,
+            JobType.STATIC_ANALYSIS: toolchain.static_analysis_command,
+        }.get(stage)
+    )
 
 
 def _next_stage(project: Project, report: ValidationReport) -> JobType | None:
@@ -890,7 +893,7 @@ def _next_stage(project: Project, report: ValidationReport) -> JobType | None:
     for stage in _VALIDATION_STAGES:
         if done[stage] is False:
             return None
-        if done[stage] is None and _stage_command(project, stage):
+        if done[stage] is None and _stage_is_configured(project, stage):
             return stage
     return None
 
