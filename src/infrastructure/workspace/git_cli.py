@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,7 +54,12 @@ class GitResult:
 class GitCommandRunner:
     """Runs git commands, converting failures into ``WorkspaceError``."""
 
-    __slots__ = ("_executable", "_identity", "_timeout_seconds")
+    __slots__ = (
+        "_config_path",
+        "_executable",
+        "_identity",
+        "_timeout_seconds",
+    )
 
     def __init__(
         self,
@@ -66,6 +72,7 @@ class GitCommandRunner:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._executable = executable
+        self._config_path: str | None = None
         self._timeout_seconds = timeout_seconds
         self._identity = (
             "-c",
@@ -143,19 +150,47 @@ class GitCommandRunner:
             )
         return result
 
+    def _global_config(self) -> str:
+        """A global git config containing exactly one setting we must express.
+
+        ``safe.directory`` is honoured **only** from protected configuration —
+        system or global — and is deliberately ignored when passed as ``-c`` or
+        set in the repository. So the one way to state it is a global file, and
+        pointing GIT_CONFIG_GLOBAL at /dev/null made it unstateable.
+
+        It matters because the orchestrator legitimately works on repositories
+        owned by another uid: a project bind-mounted into the container belongs
+        to the host user while the control plane runs unprivileged, and git then
+        refuses with "detected dubious ownership".
+
+        Relaxing it here is safe because what that check protects against is
+        executing configuration and hooks from a repository someone else
+        controls — and ``core.hooksPath=/dev/null`` is passed on every single
+        invocation, so there are none to execute.
+
+        This file is written once, owned by us, and contains nothing else: the
+        host's ~/.gitconfig still cannot influence a run.
+        """
+        if self._config_path is None:
+            directory = tempfile.mkdtemp(prefix="agentic-git-")
+            path = Path(directory) / "config"
+            path.write_text("[safe]\n\tdirectory = *\n", encoding="utf-8")
+            self._config_path = str(path)
+        return self._config_path
+
     def _environment(self, cwd: Path | str, extra: Mapping[str, str] | None) -> dict[str, str]:
         """A minimal, reproducible environment.
 
-        Global and system git configuration are neutralised so that a run's
-        behaviour depends on the repository and on this code, not on whatever
-        the host happens to have in ``~/.gitconfig``.
+        System configuration is neutralised, and the global file is one we write
+        ourselves, so a run's behaviour depends on the repository and on this
+        code rather than on whatever the host has in ``~/.gitconfig``.
         """
         env = {key: os.environ[key] for key in _INHERITED_ENVIRONMENT_KEYS if key in os.environ}
         env.update(
             {
                 "HOME": str(cwd),
                 "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_GLOBAL": self._global_config(),
                 "GIT_TERMINAL_PROMPT": "0",
                 "GIT_ASKPASS": "",
                 "GIT_PAGER": "cat",
