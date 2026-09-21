@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     heartbeat_interval_seconds: float = 10.0
     heartbeat_timeout_seconds: float = 45.0
     job_lease_seconds: float = 120.0
+    reserved_output_tokens: int = 4_096
+    """Room kept in every worker's context window for the model's answer.
+
+    Used twice, deliberately from one place: the scheduler subtracts it when
+    deciding whether a prompt fits, and it becomes the engine's own max_tokens
+    so the generation cannot quietly exceed what was reserved for it. Two
+    numbers that had to agree is exactly how the 262144/16384 mismatch
+    happened.
+    """
     job_max_attempts: int = 3
     reaper_interval_seconds: float = 10.0
     executor_concurrency: int = 8

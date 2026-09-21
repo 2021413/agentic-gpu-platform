@@ -23,6 +23,7 @@ __all__ = [
     "JobLeaseExpiredError",
     "LLMTimeoutError",
     "NoCompatibleWorkerError",
+    "OutputTruncatedError",
     "PlanValidationError",
     "RunCancelledError",
     "StructuredOutputError",
@@ -160,6 +161,19 @@ class StructuredOutputError(DomainError):
         self.schema = schema
         self.raw_output = raw_output
         self.attempt = attempt
+
+
+class OutputTruncatedError(StructuredOutputError):
+    """The answer ran out of room before it was finished.
+
+    A subclass because it *is* a structured-output failure to everything that
+    only wants to catch one thing, and its own type because the one useful
+    reaction differs: a schema violation is worth re-asking with the violation
+    attached, while a truncation re-asked under the same budget truncates at
+    exactly the same place.
+    """
+
+    code = "output_truncated"
 
 
 class PlanValidationError(DomainError):

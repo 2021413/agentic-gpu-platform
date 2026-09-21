@@ -212,3 +212,26 @@ async def test_a_busy_agent_reports_its_load_and_a_drain_is_honoured(
     available = await client.get("/v1/workers", params={"only_available": True})
     assert available.status_code == 200, available.text
     assert worker_id not in [w["id"] for w in available.json()["workers"]]
+
+
+async def test_the_reserve_reaches_both_the_scheduler_and_the_engine(
+    container: Container,
+) -> None:
+    """One setting, two users that used to be able to disagree.
+
+    The scheduler subtracts a reserve when deciding whether a prompt fits. If
+    the generation is not bounded by that same number, the subtraction is a
+    fiction — nothing stopped the engine from spending the whole remaining
+    window. Asserted on the assembled container, because what broke here was
+    never the components; it was the wiring between them.
+    """
+    reserve = container.settings.reserved_output_tokens
+    assert reserve > 0
+
+    # The engine's own ceiling.
+    assert container.orchestrator._coder.completion.max_tokens == reserve
+    assert container.orchestrator._planner.completion.max_tokens == reserve
+    assert container.orchestrator._reviewer.completion.max_tokens == reserve
+
+    # The scheduler's arithmetic.
+    assert container.orchestrator._config.reserved_output_tokens == reserve

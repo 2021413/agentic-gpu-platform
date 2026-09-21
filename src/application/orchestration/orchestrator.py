@@ -19,6 +19,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Final
 
 from application.dto.agent_io import CodeDraft, PlanDraft, ReviewDraft, format_findings
 from application.orchestration.agents import CoderAgent, PlannerAgent, ReviewerAgent
@@ -46,6 +47,7 @@ from domain.exceptions import (
     InferenceError,
     LLMTimeoutError,
     NoCompatibleWorkerError,
+    OutputTruncatedError,
     StructuredOutputError,
     ToolExecutionError,
     WorkspaceError,
@@ -970,18 +972,30 @@ def _next_stage(project: Project, report: ValidationReport) -> JobType | None:
     return None
 
 
+# Order matters: the first match wins, so a subclass must come before its base.
+# OutputTruncatedError is a StructuredOutputError and must not be classified as
+# one — re-asking a truncated answer reproduces the truncation exactly.
+_FAILURE_KINDS: Final[tuple[tuple[type[Exception], FailureKind], ...]] = (
+    (OutputTruncatedError, FailureKind.OUTPUT_TRUNCATED),
+    (StructuredOutputError, FailureKind.INVALID_STRUCTURED_OUTPUT),
+    (LLMTimeoutError, FailureKind.INFERENCE),
+    (InferenceError, FailureKind.INFERENCE),
+    (NoCompatibleWorkerError, FailureKind.INFRASTRUCTURE),
+    (ToolExecutionError, FailureKind.TOOL),
+    (WorkspaceError, FailureKind.INFRASTRUCTURE),
+)
+
+
 def _classify(exc: Exception) -> FailureKind:
-    """Map an exception to the failure kind the retry policy branches on."""
-    if isinstance(exc, StructuredOutputError):
-        return FailureKind.INVALID_STRUCTURED_OUTPUT
-    if isinstance(exc, LLMTimeoutError | InferenceError):
-        return FailureKind.INFERENCE
-    if isinstance(exc, NoCompatibleWorkerError):
-        return FailureKind.INFRASTRUCTURE
-    if isinstance(exc, ToolExecutionError):
-        return FailureKind.TOOL
-    if isinstance(exc, WorkspaceError):
-        return FailureKind.INFRASTRUCTURE
+    """Map an exception to the failure kind the retry policy branches on.
+
+    Anything unrecognised is infrastructure: the safe assumption is that the
+    machine failed, which is retried on another worker, rather than that the
+    model did, which would send an unrelated error into the repair loop.
+    """
+    for error_type, kind in _FAILURE_KINDS:
+        if isinstance(exc, error_type):
+            return kind
     return FailureKind.INFRASTRUCTURE
 
 

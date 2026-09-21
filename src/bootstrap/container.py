@@ -211,6 +211,7 @@ async def build_container(
         renderer=renderer,
         codec=codec,
         timeout_seconds=settings.llm_request_timeout_seconds,
+        max_tokens=settings.reserved_output_tokens,
     )
 
     provider_factory = llm_factory or _build_llm_factory(settings)
@@ -235,6 +236,7 @@ async def build_container(
             lease_duration=settings.job_lease,
             job_max_attempts=settings.job_max_attempts,
             static_analysis_is_blocking=settings.static_analysis_is_blocking,
+            reserved_output_tokens=settings.reserved_output_tokens,
         ),
     )
     executor = JobExecutor(

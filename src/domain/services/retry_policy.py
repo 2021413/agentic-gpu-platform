@@ -76,6 +76,18 @@ class RetryPolicy:
                 RetryAction.AGENTIC_REPAIR, reason=f"{kind} is repaired by the coder, not retried"
             )
 
+        if kind is FailureKind.OUTPUT_TRUNCATED:
+            # Re-asking spends another full generation to hit the same wall.
+            # The parser refuses to repair it for that reason; the job level
+            # used to retry it anyway, twice, on billed hardware.
+            return RetryDecision(
+                RetryAction.FAIL,
+                reason=(
+                    "the answer ran out of room before it was finished; "
+                    "raise the worker's token budget or narrow the prompt"
+                ),
+            )
+
         if kind is FailureKind.INVALID_STRUCTURED_OUTPUT:
             if attempt >= self.max_structured_output_repairs:
                 return RetryDecision(

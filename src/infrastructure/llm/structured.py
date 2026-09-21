@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from domain.entities.review import ReviewFinding, Severity
 from domain.enums import AgentRole, ReviewVerdict
-from domain.exceptions import StructuredOutputError
+from domain.exceptions import OutputTruncatedError, StructuredOutputError
 from domain.ports.llm_provider import LLMProvider
 from domain.value_objects.llm import ChatMessage, CompletionRequest, CompletionResult, TokenUsage
 
@@ -347,8 +347,11 @@ class StructuredOutputParser[ModelT: BaseModel]:
             raw = _answer_text(result)
 
             if result.truncated:
-                # Retrying with the same budget would truncate identically.
-                raise StructuredOutputError(
+                # Retrying with the same budget would truncate identically, so
+                # this is raised as its own failure kind rather than as a schema
+                # violation: the retry policy used to repair-prompt it twice
+                # before giving up, on a cause no prompt can fix.
+                raise OutputTruncatedError(
                     "model answer hit the token limit before the JSON was complete",
                     schema=self.schema_name,
                     raw_output=raw,

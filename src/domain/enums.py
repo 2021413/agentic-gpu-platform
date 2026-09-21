@@ -218,6 +218,14 @@ class FailureKind(StrEnum):
     INVALID_STRUCTURED_OUTPUT = "INVALID_STRUCTURED_OUTPUT"
     """The model answered, but the answer did not validate against the schema."""
 
+    OUTPUT_TRUNCATED = "OUTPUT_TRUNCATED"
+    """The answer ran out of room before it was finished.
+
+    Distinct from INVALID_STRUCTURED_OUTPUT although it arrives looking like
+    it: a truncated answer is malformed, but re-asking produces the identical
+    truncation. It is a budget problem and belongs to whoever sets the window.
+    """
+
     TOOL = "TOOL"
     """A deterministic tool could not be executed at all."""
 
