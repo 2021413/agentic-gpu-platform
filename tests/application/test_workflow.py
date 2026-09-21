@@ -208,6 +208,47 @@ async def test_a_failing_review_sends_the_candidate_back_to_the_coder(platform: 
     assert run.repair_iterations == 1
 
 
+async def test_a_run_created_through_the_use_case_actually_starts(
+    platform: Platform, project
+) -> None:
+    """Creating a run and scheduling it are two different things.
+
+    The HTTP layer only creates: it persists the run and answers, so a client is
+    never held on a GPU. Nothing then called start(), and _advance ignored
+    CREATED, so a run created over the API sat there forever while the API
+    reported success. The maintenance sweep is what closes the gap, and this
+    test fails if it is ever removed.
+    """
+    await platform.add_worker()
+    view = await create_run(platform, project, candidate_count=1)
+
+    # Deliberately no orchestrator.start(): that is what the API does not do.
+    assert platform.store.runs.items[view.id].status is RunStatus.CREATED
+
+    started = await platform.orchestrator.start_pending_runs()
+
+    assert view.id in started
+    assert platform.store.runs.items[view.id].status is not RunStatus.CREATED
+    assert platform.queue.pending > 0, "no job was scheduled for the run"
+
+    await platform.drain()
+    assert platform.store.runs.items[view.id].status is RunStatus.COMPLETED
+
+
+async def test_starting_pending_runs_twice_schedules_nothing_extra(
+    platform: Platform, project
+) -> None:
+    """The sweep runs on every maintenance tick, so it must be idempotent."""
+    await platform.add_worker()
+    await create_run(platform, project, candidate_count=1)
+
+    await platform.orchestrator.start_pending_runs()
+    scheduled = len(platform.store.jobs.items)
+
+    assert await platform.orchestrator.start_pending_runs() == []
+    assert len(platform.store.jobs.items) == scheduled
+
+
 async def test_a_cancelled_run_stops_scheduling(platform: Platform, project):
     await platform.add_worker()
     view = await create_run(platform, project, candidate_count=2)

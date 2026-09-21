@@ -407,21 +407,21 @@ def _planner_answer(objective: str) -> str:
 
 
 def _coder_answer(objective: str) -> str:
+    """Answer with whole files, the shape the real prompt now asks for.
+
+    The double used to emit a unified diff, which is exactly what a real model
+    got wrong twice in a row. A fake that answers in a form the real one
+    struggles with proves the wrong thing.
+    """
     slug = _slug(objective)
     path = f"src/{slug}.py"
-    diff = "\n".join(
+    content = "\n".join(
         (
-            f"diff --git a/{path} b/{path}",
-            "new file mode 100644",
-            "index 0000000..1111111",
-            "--- /dev/null",
-            f"+++ b/{path}",
-            "@@ -0,0 +1,5 @@",
-            f'+"""{objective}."""',
-            "+",
-            "+",
-            f"+def {slug[:30] or 'run'}() -> str:",
-            f'+    return "{_digest(objective)}"',
+            f'"""{objective}."""',
+            "",
+            "",
+            f"def {slug[:30] or 'run'}() -> str:",
+            f'    return "{_digest(objective)}"',
             "",
         )
     )
@@ -429,7 +429,7 @@ def _coder_answer(objective: str) -> str:
         {
             "task_key": "implement",
             "summary": f"Added {path} implementing: {objective}",
-            "diff": diff,
+            "files": [{"path": path, "content": content}],
             "files_changed": [path],
             "commands_run": ["pytest -q"],
             "uncertainties": [],

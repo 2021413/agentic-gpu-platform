@@ -53,6 +53,18 @@ def is_directory(path: str | Path) -> bool:
     return Path(path).is_dir()
 
 
+def read_text(path: str | Path) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
+def make_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def make_symlink(link: Path, target: Path) -> None:
+    link.symlink_to(target, target_is_directory=True)
+
+
 def same_path(left: str | Path, right: str | Path) -> bool:
     return Path(left).samefile(right)
 
@@ -360,3 +372,121 @@ async def test_a_repository_without_worktrees_falls_back_to_a_clone(
 
 def test_the_manager_satisfies_the_domain_port(manager: GitWorktreeWorkspaceManager) -> None:
     assert isinstance(manager, WorkspaceManager)
+
+
+# ---------------------------------------------------------------------------
+# Whole-file writes.
+#
+# This is the path a coder answer now takes end to end: the model returns file
+# contents, the workspace writes them, git computes the diff. It replaced the
+# unified-diff path, which a real model got wrong twice in a row and failed a
+# run with "No valid patches in input". Everything below runs against a real
+# git repository on disk, because what is under test is exactly the part a
+# double would have papered over.
+# ---------------------------------------------------------------------------
+
+
+async def writable_workspace(manager: GitWorktreeWorkspaceManager, project: Project) -> Any:
+    return await manager.create(
+        project=project,
+        run_id=RunId.generate(),
+        role=WorkspaceRole.CANDIDATE,
+        candidate_id=CandidateId.generate(),
+    )
+
+
+async def test_written_files_become_a_diff_git_can_read(
+    manager: GitWorktreeWorkspaceManager, project: Project
+) -> None:
+    """The whole contract in one test: contents in, unified diff out."""
+    handle = await writable_workspace(manager, project)
+
+    written = await manager.write_files(
+        handle,
+        {
+            "src/app.py": "def main() -> int:\n    return 1\n",
+            "src/retry/backoff.py": "WAIT = 3\n",
+        },
+    )
+
+    assert sorted(written) == ["src/app.py", "src/retry/backoff.py"]
+    patch = await manager.diff(handle)
+    assert sorted(patch.changed_paths) == ["src/app.py", "src/retry/backoff.py"]
+    assert not patch.is_empty
+    # A new file in a directory that did not exist must be created, not skipped.
+    assert read_text(Path(handle.path) / "src" / "retry" / "backoff.py") == "WAIT = 3\n"
+    # And an existing file is replaced wholesale, not appended to.
+    assert read_text(Path(handle.path) / "src" / "app.py").count("return") == 1
+
+
+async def test_writing_the_same_file_twice_keeps_the_last_content(
+    manager: GitWorktreeWorkspaceManager, project: Project
+) -> None:
+    """A repair loop rewrites the same file; the newest content must win."""
+    handle = await writable_workspace(manager, project)
+
+    await manager.write_files(handle, {"src/app.py": "first\n"})
+    await manager.write_files(handle, {"src/app.py": "second\n"})
+
+    assert read_text(Path(handle.path) / "src" / "app.py") == "second\n"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../escaped.txt",
+        "src/../../escaped.txt",
+        "/etc/escaped.txt",
+    ],
+)
+async def test_a_path_leaving_the_workspace_is_refused(
+    manager: GitWorktreeWorkspaceManager, project: Project, tmp_path: Path, path: str
+) -> None:
+    """A coder answer is untrusted input, and this is the filesystem boundary."""
+    handle = await writable_workspace(manager, project)
+
+    with pytest.raises(WorkspaceError, match="outside the workspace"):
+        await manager.write_files(handle, {path: "owned\n"})
+
+    assert not path_exists(Path(handle.path).parent / "escaped.txt")
+    assert not path_exists(tmp_path / "escaped.txt")
+
+
+async def test_a_symlink_cannot_be_used_to_escape(
+    manager: GitWorktreeWorkspaceManager, project: Project, tmp_path: Path
+) -> None:
+    """Containment is checked after resolution, so a link out is not a bypass."""
+    handle = await writable_workspace(manager, project)
+    outside = tmp_path / "outside"
+    make_directory(outside)
+    make_symlink(Path(handle.path) / "link", outside)
+
+    with pytest.raises(WorkspaceError, match="outside the workspace"):
+        await manager.write_files(handle, {"link/owned.txt": "owned\n"})
+
+    assert not path_exists(outside / "owned.txt")
+
+
+async def test_a_refused_batch_writes_nothing_at_all(
+    manager: GitWorktreeWorkspaceManager, project: Project
+) -> None:
+    """One bad path must not leave a half-applied workspace behind."""
+    handle = await writable_workspace(manager, project)
+
+    with pytest.raises(WorkspaceError, match="outside the workspace"):
+        await manager.write_files(handle, {"src/good.py": "kept\n", "../escaped.txt": "owned\n"})
+
+    assert not path_exists(Path(handle.path) / "src" / "good.py")
+    assert (await manager.diff(handle)).is_empty
+
+
+async def test_a_read_only_workspace_refuses_writes(
+    manager: GitWorktreeWorkspaceManager, project: Project
+) -> None:
+    """The planner reads the repository; it must not be able to change it."""
+    planner = await manager.create(
+        project=project, run_id=RunId.generate(), role=WorkspaceRole.PLANNER
+    )
+
+    with pytest.raises(WorkspaceError, match="read-only"):
+        await manager.write_files(planner, {"src/app.py": "nope\n"})

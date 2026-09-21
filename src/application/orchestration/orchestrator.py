@@ -781,10 +781,17 @@ class RunOrchestrator:
     async def _materialize_patch(self, *, workspace: WorkspaceHandle, draft: CodeDraft) -> Patch:
         """Turn the coder's answer into a patch that actually exists on disk.
 
-        A diff the model merely *described* is worthless; applying it and then
-        reading the workspace back is what makes the patch trustworthy.
+        Whole files are preferred over a diff: writing them and asking git for
+        the difference cannot fail on malformed hunk headers, which is how a
+        coder job died twice in a row with "No valid patches in input" the first
+        time this ran against a real model.
+
+        Either way the patch is read back from the workspace, never taken from
+        the model's word for it.
         """
-        if draft.diff.strip():
+        if draft.files:
+            await self._workspaces.write_files(workspace, {f.path: f.content for f in draft.files})
+        elif draft.diff.strip():
             await self._workspaces.apply_patch(workspace, Patch.from_unified_diff(draft.diff))
         return await self._workspaces.diff(workspace)
 
