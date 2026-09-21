@@ -154,7 +154,9 @@ services:
       WORKER_ENDPOINT: ${WORKER_ENDPOINT:-http://worker-gpu:9000}
       WORKER_PORT: "9000"
       LLM_PROVIDER: vllm
-      MODEL_ID: ${MODEL_ID:-Qwen/Qwen3-Coder-30B-A3B-Instruct}
+      # Must name what vLLM actually serves: the image defaults to the FP8
+      # repository, and the agent reconciles against /v1/models anyway.
+      MODEL_ID: ${MODEL_ID:-Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8}
       MODEL_CONTEXT_LENGTH: ${MODEL_CONTEXT_LENGTH:-131072}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
       WORKER_ROLES: ${WORKER_ROLES:-PLANNER,CODER,REVIEWER}

@@ -79,6 +79,32 @@ class InferenceProbe:
             await asyncio.sleep(poll_seconds)
         return False
 
+    async def served_model_id(self) -> str | None:
+        """The name the engine answers to, or ``None`` if it does not say.
+
+        The control plane sends this verbatim as the ``model`` field, and vLLM
+        refuses any name it does not serve. The value is decided in three
+        places — the repository id, SERVED_MODEL_NAME, and whatever the agent
+        was configured with — so asking the engine is the only way to be right.
+        """
+        card = await self._first_model_card()
+        served = card.get("id") if card else None
+        return served if isinstance(served, str) and served else None
+
+    async def _first_model_card(self) -> dict[str, object] | None:
+        try:
+            response = await self._client.get("/v1/models")
+        except httpx.HTTPError:
+            return None
+        if not response.is_success:
+            return None
+        try:
+            models = response.json().get("data") or []
+        except ValueError:
+            return None
+        cards = [card for card in models if isinstance(card, dict)]
+        return cards[0] if cards else None
+
     async def served_context_length(self) -> int | None:
         """The context window the engine is actually serving, or ``None``.
 

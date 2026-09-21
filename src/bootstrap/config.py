@@ -90,6 +90,18 @@ class Settings(BaseSettings):
     model_id: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
     model_context_length: int = 262_144
     llm_request_timeout_seconds: float = 600.0
+    inference_api_key: SecretStr = SecretStr("")
+    """Bearer token the inference engines demand, if they demand one.
+
+    vLLM started with VLLM_API_KEY refuses everything without it. The adapter
+    has always been able to send a token; nothing passed one, so an engine
+    secured as its own documentation recommends would have answered 401 to
+    every call, on hardware billing by the second.
+
+    Empty means the engines are open, which on an exposed Pod means open to
+    the internet. An empty value sends no header rather than a literal
+    "Bearer ".
+    """
 
     # -- scheduling and jobs --------------------------------------------
     scheduler_strategy: SchedulerStrategy = SchedulerStrategy.LEAST_LOADED

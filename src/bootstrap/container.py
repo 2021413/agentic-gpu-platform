@@ -155,6 +155,7 @@ def _build_llm_factory(settings: Settings) -> LLMProviderFactory:
         )
     return HttpLLMProviderFactory(
         OpenAICompatibleSettings(
+            api_key=settings.inference_api_key.get_secret_value() or None,
             context_length=settings.model_context_length,
             default_timeout_seconds=settings.llm_request_timeout_seconds,
         )

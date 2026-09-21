@@ -80,6 +80,23 @@ class FakeProbe(InferenceProbe):
         """Declines to say, so the declared value is kept — see ServedLengthProbe."""
         return None
 
+    async def served_model_id(self) -> str | None:
+        """Likewise. Overridden rather than inherited because the real probe
+        would reach for the network, and a unit test that waits on a DNS
+        timeout is a unit test in name only."""
+        return None
+
+
+class ServedModelProbe(FakeProbe):
+    """Healthy, and names the model it serves — or declines to."""
+
+    def __init__(self, served: str | None) -> None:
+        super().__init__()
+        self._served = served
+
+    async def served_model_id(self) -> str | None:
+        return self._served
+
 
 class ServedLengthProbe(FakeProbe):
     """Healthy, and says what the engine serves — or declines to say."""
@@ -358,3 +375,29 @@ async def test_an_engine_that_does_not_say_leaves_the_declared_value_alone() -> 
     await agent.start()
 
     assert plane.registrations[-1]["context_length"] == 262_144
+
+
+async def test_the_worker_advertises_the_model_name_the_engine_answers_to() -> None:
+    """A 404 on every call, waiting to happen.
+
+    The control plane sends `"model": <what the worker registered>`, and vLLM
+    refuses any name it does not serve. The compose file defaults the agent to
+    `Qwen/Qwen3-Coder-30B-A3B-Instruct` while the image serves the `-FP8`
+    repository, and SERVED_MODEL_NAME can rename it again. Three places for one
+    string, none of them reconciled.
+    """
+    plane = FakeControlPlane()
+    agent = build(plane, ServedModelProbe("qwen3-coder"))
+
+    await agent.start()
+
+    assert plane.registrations[-1]["model_id"] == "qwen3-coder"
+
+
+async def test_an_engine_that_does_not_name_itself_leaves_the_declared_id_alone() -> None:
+    plane = FakeControlPlane()
+    agent = build(plane, ServedModelProbe(None))
+
+    await agent.start()
+
+    assert plane.registrations[-1]["model_id"] == "Qwen3-Coder-30B-A3B"
