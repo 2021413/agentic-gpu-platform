@@ -12,10 +12,10 @@ import contextlib
 import logging
 import signal
 
-from bootstrap.config import WorkerSettings
+from bootstrap.config import LLMProviderKind, WorkerSettings
 from worker_agent.agent import WorkerAgent, WorkerDescription
 from worker_agent.client import ControlPlaneClient
-from worker_agent.inference import InferenceProbe
+from worker_agent.inference import InferenceProbe, InProcessInferenceProbe
 
 __all__ = ["main", "run_worker"]
 
@@ -28,10 +28,15 @@ def build_agent(settings: WorkerSettings) -> tuple[WorkerAgent, ControlPlaneClie
         base_url=settings.control_plane_url,
         service_token=settings.service_token.get_secret_value(),
     )
-    probe = InferenceProbe(
-        base_url=settings.inference_base_url,
-        api_key=settings.inference_api_key.get_secret_value(),
-    )
+    probe: InferenceProbe
+    if settings.llm_provider is LLMProviderKind.FAKE:
+        # Nothing listens at inference_base_url in this mode; see the class.
+        probe = InProcessInferenceProbe()
+    else:
+        probe = InferenceProbe(
+            base_url=settings.inference_base_url,
+            api_key=settings.inference_api_key.get_secret_value(),
+        )
     description = WorkerDescription(
         endpoint=settings.worker_endpoint,
         model_id=settings.model_id,

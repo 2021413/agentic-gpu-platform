@@ -210,6 +210,17 @@ class WorkerSettings(BaseSettings):
     inference_base_url: str = "http://127.0.0.1:8000"
     inference_api_key: SecretStr = SecretStr("")
 
+    llm_provider: LLMProviderKind = LLMProviderKind.OPENAI_COMPATIBLE
+    """Which provider backs this worker.
+
+    The field has to exist here even though the worker never calls the model
+    itself: with the fake provider the inference runs inside the control plane,
+    so there is no server at `inference_base_url` to wait for. Without this,
+    `extra="ignore"` silently dropped the LLM_PROVIDER the compose file sets,
+    the agent waited out its startup timeout against nothing, and the pool
+    stayed empty.
+    """
+
     model_id: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
     model_context_length: int = 262_144
     worker_concurrency: int = 4

@@ -14,7 +14,7 @@ from typing import Self
 
 import httpx
 
-__all__ = ["InferenceProbe"]
+__all__ = ["InProcessInferenceProbe", "InferenceProbe"]
 
 _log = logging.getLogger(__name__)
 
@@ -114,4 +114,33 @@ class InferenceProbe:
     async def active_requests(self) -> int | None:
         """Best-effort occupancy. ``None`` when the engine does not report it,
         in which case the control plane relies on its own accounting."""
+        return None
+
+
+class InProcessInferenceProbe(InferenceProbe):
+    """For a provider that has no server to poll.
+
+    The fake provider runs inside the control plane, so a worker backed by it
+    exposes no inference endpoint. Waiting for one is not caution, it is a
+    deadlock: the agent sat out its whole startup timeout and never registered.
+
+    It reports ready, and reports no served context length — it serves nothing,
+    so it has nothing to say about a window, and the declared value stands.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(base_url="http://in-process.invalid")
+
+    async def is_healthy(self) -> bool:
+        return True
+
+    async def wait_until_ready(
+        self, *, timeout_seconds: float = 900.0, poll_seconds: float = 3.0
+    ) -> bool:
+        return True
+
+    async def served_context_length(self) -> int | None:
+        return None
+
+    async def active_requests(self) -> int | None:
         return None
