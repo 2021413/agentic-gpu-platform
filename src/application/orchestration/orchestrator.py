@@ -161,13 +161,7 @@ class RunOrchestrator:
                     return  # already started: at-least-once delivery, not an error
                 project = await self._require_project(uow, run)
 
-                now = self._clock.now()
-                if bool(run.metadata.get("requires_plan", True)):
-                    run.start_planning(now)
-                    jobs = [self._new_job(run, JobType.PLAN, role=AgentRole.PLANNER)]
-                else:
-                    run.start_coding(now)
-                    jobs = await self._open_candidates(uow, run=run, project=project)
+                jobs = await self._open_first_stage(uow, run=run, project=project)
 
                 await self._persist_jobs(uow, jobs)
                 await uow.runs.update(run)
@@ -212,6 +206,21 @@ class RunOrchestrator:
             uow.collect(run)
             await commit_and_publish(uow, self._bus)
         await self._workspaces.release_run(job.run_id)
+
+    async def start_pending_runs(self) -> Sequence[RunId]:
+        """Start runs that were created but never scheduled.
+
+        Creating a run and scheduling it are two different things, and the HTTP
+        layer only does the first: it persists the run and answers, so a client
+        is never left waiting on a GPU. This sweep is what makes the second
+        happen, and it is idempotent — ``_advance`` ignores anything already
+        under way.
+        """
+        async with self._uow_factory() as uow:
+            pending = [r.id for r in await uow.runs.list_active() if r.status is RunStatus.CREATED]
+        for run_id in pending:
+            await self._advance(run_id)
+        return pending
 
     async def resume_active_runs(self) -> Sequence[RunId]:
         """Re-schedule work for runs left in flight by an orchestrator restart.
@@ -524,7 +533,12 @@ class RunOrchestrator:
                 if _has_unfinished(jobs):
                     return  # something is still running; it will call us back
 
-                if run.status is RunStatus.PLAN_READY:
+                if run.status is RunStatus.CREATED:
+                    # A run created over HTTP used to sit here forever: nothing
+                    # called start(), and this method ignored CREATED. The API
+                    # could accept a run that never executed.
+                    follow_ups = await self._open_first_stage(uow, run=run, project=project)
+                elif run.status is RunStatus.PLAN_READY:
                     run.start_coding(now)
                     follow_ups = await self._open_candidates(uow, run=run, project=project)
                 elif run.status in (RunStatus.CODING, RunStatus.VALIDATING, RunStatus.REPAIRING):
@@ -712,6 +726,19 @@ class RunOrchestrator:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+    async def _open_first_stage(self, uow: UnitOfWork, *, run: Run, project: Project) -> list[Job]:
+        """The first jobs of a run: plan, or code directly.
+
+        Whether the planner is involved was decided when the run was created, by
+        an explicit complexity policy; the orchestrator only obeys it.
+        """
+        now = self._clock.now()
+        if bool(run.metadata.get("requires_plan", True)):
+            run.start_planning(now)
+            return [self._new_job(run, JobType.PLAN, role=AgentRole.PLANNER)]
+        run.start_coding(now)
+        return await self._open_candidates(uow, run=run, project=project)
+
     async def _open_candidates(self, uow: UnitOfWork, *, run: Run, project: Project) -> list[Job]:
         """Create the candidates and their isolated workspaces, then their jobs.
 
