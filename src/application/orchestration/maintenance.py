@@ -64,9 +64,9 @@ class MaintenanceLoop:
             # persists the run and answers immediately rather than holding a
             # client on a GPU. Without this sweep a run created over HTTP stayed
             # in CREATED forever, and the API could accept work it never did.
-            started = await self._orchestrator.start_pending_runs()
+            started = await self._orchestrator.advance_stalled_runs()
             if started:
-                _log.info("started %d run(s) that were waiting to be scheduled", len(started))
+                _log.info("advanced %d run(s) that had stopped without finishing", len(started))
 
         reaped = await self._reaper.execute()
         if reaped:

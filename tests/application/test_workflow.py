@@ -225,7 +225,7 @@ async def test_a_run_created_through_the_use_case_actually_starts(
     # Deliberately no orchestrator.start(): that is what the API does not do.
     assert platform.store.runs.items[view.id].status is RunStatus.CREATED
 
-    started = await platform.orchestrator.start_pending_runs()
+    started = await platform.orchestrator.advance_stalled_runs()
 
     assert view.id in started
     assert platform.store.runs.items[view.id].status is not RunStatus.CREATED
@@ -242,10 +242,10 @@ async def test_starting_pending_runs_twice_schedules_nothing_extra(
     await platform.add_worker()
     await create_run(platform, project, candidate_count=1)
 
-    await platform.orchestrator.start_pending_runs()
+    await platform.orchestrator.advance_stalled_runs()
     scheduled = len(platform.store.jobs.items)
 
-    assert await platform.orchestrator.start_pending_runs() == []
+    assert await platform.orchestrator.advance_stalled_runs() == []
     assert len(platform.store.jobs.items) == scheduled
 
 

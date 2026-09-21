@@ -15,6 +15,7 @@ Two rules shape everything here:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -218,20 +219,36 @@ class RunOrchestrator:
             await commit_and_publish(uow, self._bus)
         await self._workspaces.release_run(job.run_id)
 
-    async def start_pending_runs(self) -> Sequence[RunId]:
-        """Start runs that were created but never scheduled.
+    async def advance_stalled_runs(self) -> Sequence[RunId]:
+        """Push along every run that has stopped without finishing.
 
-        Creating a run and scheduling it are two different things, and the HTTP
-        layer only does the first: it persists the run and answers, so a client
-        is never left waiting on a GPU. This sweep is what makes the second
-        happen, and it is idempotent — ``_advance`` ignores anything already
-        under way.
+        Two shapes, one cause: ``_advance`` runs exactly once, when a job ends.
+
+        A run created over HTTP was never advanced at all — the API persists it
+        and answers rather than holding a client on a GPU, and nothing did the
+        second half. And a run whose last job finished could miss its one call
+        to ``_advance`` — a restart, a crash, a lost race with the job's own
+        status write — after which nothing would ever call it again. That one
+        was seen on a real stack: every job SUCCEEDED, the candidate validated,
+        the review PASS, and the run sat in REVIEWING with no error anywhere.
+
+        Idempotent by construction: a run with a job still in flight is skipped,
+        so a sweep can never hand the same candidate to a second worker.
         """
         async with self._uow_factory() as uow:
-            pending = [r.id for r in await uow.runs.list_active() if r.status is RunStatus.CREATED]
-        for run_id in pending:
-            await self._advance(run_id)
-        return pending
+            stalled: list[RunId] = []
+            for run in await uow.runs.list_active():
+                if run.is_terminal or run.is_cancelling:
+                    continue
+                if run.status is RunStatus.CREATED:
+                    stalled.append(run.id)
+                    continue
+                jobs = await uow.jobs.list_by_run(run.id)
+                # No jobs at all is not "stalled": the run is between states
+                # inside a transaction that has not committed yet.
+                if jobs and not _has_unfinished(list(jobs)):
+                    stalled.append(run.id)
+        return await self._advance_each(stalled, what="advance")
 
     async def resume_active_runs(self) -> Sequence[RunId]:
         """Re-schedule work for runs left in flight by an orchestrator restart.
@@ -242,9 +259,49 @@ class RunOrchestrator:
         async with self._uow_factory() as uow:
             runs = await uow.runs.list_active()
             run_ids = [run.id for run in runs]
+        return await self._advance_each(run_ids, what="resume after a restart")
+
+    async def _advance_each(self, run_ids: Sequence[RunId], *, what: str) -> Sequence[RunId]:
+        """Advance many runs, letting no single one take down the caller.
+
+        Both callers sweep every active run: one at startup, one on a timer.
+        Without this isolation a single unrecoverable row — a workspace the
+        restart destroyed, say — raised out of startup and put the whole
+        control plane in a crash loop, serving nothing and advancing nothing.
+
+        A run that cannot be advanced is failed rather than left active, or it
+        would be retried on every boot forever while still reading as in-flight
+        to anyone asking the API.
+        """
+        advanced: list[RunId] = []
         for run_id in run_ids:
-            await self._advance(run_id)
-        return run_ids
+            try:
+                await self._advance(run_id)
+            except Exception as exc:
+                _log.exception("could not %s run %s; failing it", what, run_id)
+                await self._fail_unrecoverable(run_id, what=what, exc=exc)
+                continue
+            advanced.append(run_id)
+        return advanced
+
+    async def _fail_unrecoverable(self, run_id: RunId, *, what: str, exc: Exception) -> None:
+        """Record why a run can never continue. Best effort, and silent if even
+        that fails: the caller is a startup path and must still come up."""
+        with contextlib.suppress(Exception):
+            async with self._coordinator.lock(run_id), self._uow_factory() as uow:
+                run = await uow.runs.get(run_id)
+                if run is None or run.is_terminal:
+                    return
+                run.fail(
+                    now=self._clock.now(),
+                    kind=_classify(exc),
+                    reason=f"could not {what} this run: {exc}",
+                )
+                await uow.runs.update(run)
+                uow.collect(run)
+                await commit_and_publish(uow, self._bus)
+        with contextlib.suppress(Exception):
+            await self._workspaces.release_run(run_id)
 
     # ------------------------------------------------------------------
     # job dispatch
