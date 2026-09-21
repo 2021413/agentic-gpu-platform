@@ -58,12 +58,19 @@ TCP_NOTE = (
     "than cache it."
 )
 
-# Mirrors src/worker/config.py. Changing a default here without changing it
-# there produces a Pod that boots with settings nobody chose.
-DEFAULT_MODEL_ID = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
-DEFAULT_PERSISTENT_ROOT = "/runpod-volume"
+# Imported, not mirrored. These used to be copied here with a comment warning
+# that changing one side without the other would boot a Pod with settings nobody
+# chose — which is exactly what happened: MIN_FREE_DISK_GB was lowered to 40 in
+# the worker and stayed 60 here, and the next Pod would have refused to start on
+# a volume that suits it perfectly. One source of truth removes the whole class
+# of drift.
+from worker.config import (  # noqa: E402 - placed with the other constants
+    DEFAULT_MIN_FREE_DISK_GB,
+    DEFAULT_MODEL_ID,
+    DEFAULT_PERSISTENT_ROOT,
+)
+
 DEFAULT_WORKER_PORT = 8000
-DEFAULT_MIN_FREE_DISK_GB = 60.0
 
 MAX_TCP_PORT = 65535
 SYMMETRIC_PORT_FLOOR = 70000  # ports requested above this ask for a 1:1 mapping

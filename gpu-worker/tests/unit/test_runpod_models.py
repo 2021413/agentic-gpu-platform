@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from runpod_deployer.models import (
+    DEFAULT_MIN_FREE_DISK_GB,
     PROXY_TIMEOUT_SECONDS,
     ExposedPort,
     PodSpec,
@@ -130,7 +131,7 @@ def test_create_body_is_exactly_what_runpod_documents() -> None:
             "MAX_MODEL_LEN": "16384",
             "GPU_MEMORY_UTILIZATION": "0.9",
             "TENSOR_PARALLEL_SIZE": "1",
-            "MIN_FREE_DISK_GB": "60",
+            "MIN_FREE_DISK_GB": f"{DEFAULT_MIN_FREE_DISK_GB:g}",
             "READINESS_TIMEOUT_SECONDS": "1800",
             "HF_TOKEN": "hf_secret",
         },
