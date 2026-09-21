@@ -96,6 +96,19 @@ class Settings(BaseSettings):
     heartbeat_interval_seconds: float = 10.0
     heartbeat_timeout_seconds: float = 45.0
     job_lease_seconds: float = 120.0
+    tool_sandbox_image: str = "python:3.12-slim"
+    """Image the deterministic tools run in when the docker sandbox is used.
+
+    It must contain the project's build and test tools. The default carries a
+    Python interpreter and nothing else — a C project pointed at it fails every
+    build with "make: not found", and every candidate is then non-viable for a
+    reason that has nothing to do with the code. Point it at an image that can
+    build what you are working on (for example `gcc:13`).
+
+    Known limitation: this is one image for the whole deployment, not one per
+    project. A control plane serving projects in different languages needs the
+    image on ToolchainConfig instead, which is a schema change.
+    """
     reserved_output_tokens: int = 4_096
     """Room kept in every worker's context window for the model's answer.
 

@@ -200,7 +200,9 @@ async def build_container(
         queue = RedisJobQueue(redis)
         bus = RedisEventBus(redis)
 
-    sandbox = create_sandbox_executor(prefer_docker=not settings.environment.is_local)
+    sandbox = create_sandbox_executor(
+        prefer_docker=not settings.environment.is_local, image=settings.tool_sandbox_image
+    )
     tools = ProjectToolExecutorFactory(sandbox=sandbox)
     context = RipgrepRepositoryContextProvider(sandbox=sandbox)
     workspace_manager = workspaces or GitWorktreeWorkspaceManager(root=settings.workspace_root)

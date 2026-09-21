@@ -55,6 +55,15 @@ curl -fsS -m5 "$API/health" >/dev/null || die "the control plane did not come ba
 # 3. Toolchain. Guessed from what is in the repository, never silently: a wrong
 #    build command reported as a code defect would poison the repair loop.
 name="$(basename "$project_path")"
+
+# Does the Makefile actually define that target? A build command that fails
+# because the target does not exist marks every candidate non-viable for a
+# reason that has nothing to do with the code.
+has_make_target() {
+    [ -f "$project_path/Makefile" ] || return 1
+    grep -qE "^$1[[:space:]]*:" "$project_path/Makefile"
+}
+
 if [ -f "$project_path/package.json" ]; then
     lang=javascript; build='npm run build --if-present'; test='npm test'
 elif [ -f "$project_path/pyproject.toml" ] || [ -f "$project_path/setup.py" ]; then
@@ -63,12 +72,46 @@ elif [ -f "$project_path/Cargo.toml" ]; then
     lang=rust; build='cargo build'; test='cargo test'
 elif [ -f "$project_path/go.mod" ]; then
     lang=go; build='go build ./...'; test='go test ./...'
+elif [ -f "$project_path/CMakeLists.txt" ]; then
+    lang=cpp; build='cmake --build build --parallel'; test='ctest --test-dir build --output-on-failure'
+elif [ -f "$project_path/Makefile" ]; then
+    # C or C++ by Makefile. The build target is whatever `make` does by
+    # default; the test target only exists if the project wrote one.
+    if ls "$project_path"/**/*.cpp "$project_path"/*.cpp >/dev/null 2>&1; then lang=cpp; else lang=c; fi
+    build='make -j4'
+    if   has_make_target test;  then test='make test'
+    elif has_make_target check; then test='make check'
+    else
+        test=''
+        echo "==> note: the Makefile defines no 'test' or 'check' target, so the"
+        echo "    test command is left unset. Validation records SKIPPED rather"
+        echo "    than inventing a target that would fail on every candidate."
+    fi
 else
     lang=unknown; build=''; test=''
     echo "==> WARNING: no recognised project file. Build and test are left unset,"
     echo "    so validation will be recorded as SKIPPED, never as passed."
 fi
 echo "==> toolchain: $lang | build: ${build:-none} | test: ${test:-none}"
+
+# The tools run inside a sandbox image, and that image must be able to run the
+# commands above. The default carries Python and nothing else.
+# `|| true`: grep exits 1 when the variable is absent, which under `set -e`
+# would kill the script right before the warning it is about to print.
+sandbox_image=$(grep -E '^TOOL_SANDBOX_IMAGE=' .env 2>/dev/null | cut -d= -f2- || true)
+sandbox_image=${sandbox_image:-python:3.12-slim}
+case "$lang:$sandbox_image" in
+    c:python*|cpp:python*|rust:python*|go:python*|javascript:python*)
+        echo
+        echo "==> WARNING: this is a $lang project, but the tools run in"
+        echo "    '$sandbox_image', which cannot build it. Every build would fail"
+        echo "    with 'not found' and every candidate would be judged non-viable"
+        echo "    for a reason unrelated to the code."
+        echo "    Set TOOL_SANDBOX_IMAGE in .env to an image that can build $lang"
+        echo "    (for $lang, e.g. gcc:13), then: docker compose up -d api"
+        echo
+        ;;
+esac
 
 json_or_null() { [ -n "$1" ] && printf '"%s"' "$1" || printf 'null'; }
 
