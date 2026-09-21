@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -33,7 +34,12 @@ from domain.value_objects.workspace import WorkspaceHandle
 from infrastructure.tools.search import SearchMatch, TextSearchBackend, parse_matches
 from infrastructure.workspace.git_cli import GitCommandRunner
 
-__all__ = ["CHARS_PER_TOKEN", "RipgrepRepositoryContextProvider", "estimate_tokens"]
+__all__ = [
+    "CHARS_PER_TOKEN",
+    "RipgrepRepositoryContextProvider",
+    "estimate_tokens",
+    "search_terms",
+]
 
 CHARS_PER_TOKEN = 4
 """The estimation constant. Documented, crude, and honest about being crude."""
@@ -226,8 +232,16 @@ class RipgrepRepositoryContextProvider:
         ]
         seen = {path for path, _, _ in ordered}
 
-        for query in request.queries:
-            matches = await self._safe_matches(workspace, query)
+        # Explicit queries first and verbatim, then whatever the objective
+        # yields. The objective used to be carried here and never read, so a
+        # caller that passed only an objective — which is every caller in
+        # production — got an empty ranking and the agents got a file tree with
+        # no code in it.
+        searches: list[tuple[str, bool]] = [(query, True) for query in request.queries]
+        searches += [(term, False) for term in search_terms(request.objective)]
+
+        for query, case_sensitive in searches:
+            matches = await self._safe_matches(workspace, query, case_sensitive=case_sensitive)
             counts: dict[str, list[SearchMatch]] = {}
             for match in matches:
                 counts.setdefault(match.path, []).append(match)
@@ -239,11 +253,21 @@ class RipgrepRepositoryContextProvider:
         return tuple(ordered)
 
     async def _safe_matches(
-        self, workspace: WorkspaceHandle, query: str
+        self, workspace: WorkspaceHandle, query: str, *, case_sensitive: bool = True
     ) -> tuple[SearchMatch, ...]:
-        """A malformed query degrades the context; it never fails the run."""
+        """A malformed query degrades the context; it never fails the run.
+
+        A term taken from an objective is matched without regard to case: the
+        user writes "the Ledger class", the code says ``class Ledger``, and
+        being strict there would cost recall for nothing. An explicit query is
+        matched exactly, because the caller chose those characters.
+        """
         result = await self._backend.run(
-            workspace=workspace, pattern=query, limits=self._limits, max_results=200
+            workspace=workspace,
+            pattern=query,
+            limits=self._limits,
+            max_results=200,
+            case_sensitive=case_sensitive,
         )
         if result.exit_code not in (0, 1):
             return ()
@@ -283,6 +307,70 @@ def _read_contained(root: Path, relative: str, max_bytes: int) -> str | None:
     except ValueError:
         return None
     return _read_text(target, max_bytes)
+
+
+_MAX_DERIVED_TERMS = 6
+"""How many terms an objective may contribute. Each one costs a search."""
+
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
+# Words that carry no location information. Matching on them would return the
+# whole repository, which is the same as returning nothing useful. English and
+# French because the objective is written by the user, in the user's language.
+# Kept as text rather than a list literal so it stays readable and so the
+# formatter leaves it alone.
+_STOPWORD_TEXT = """
+    a able about across add address adjust after ajoute ajouter all allow also ameliore
+    ameliorer an analyse analyser and any are as assure at au aux avec base be because been
+    before being better bien both bug build but by can cannot ce ces cette change changer
+    check class clean code complete completer compléte correct corrige corriger could create
+    creer creé current dans data de dear default des did do does dossier du either elle else
+    en ensure erreur error et eux ever every faire fais fait feature fichier fichiers file
+    files fix fixed fonction fonctionne for from function get got had has have how however if
+    il implement implemente implementer improve in into is issue it its jamais je just la le
+    least les let leur like likely look lui ma mais make maniere may me meme merci mes method
+    mettre might modifie modifier module moi mon most must my ne need needs neither new no nor
+    nos not notre nous of off often on only or other ou our own par pas peu peux please pour
+    problem probleme project projet proper qu que qui rather refactor regarde remove rends
+    repare reparer repo repository review run sa said say says se ses she should since so soit
+    some son support sur sure ta take te tes test tests than that the their them then there
+    these they thing this tis to toi ton too tous tout toute toutes tu twas un une update us
+    use using value verifie verifier veux vos votre vous want wants was we were what when
+    where which while who whom why will with work working would yet you your
+"""
+
+_STOPWORDS = frozenset(_STOPWORD_TEXT.split())
+
+
+def search_terms(objective: str, *, limit: int = _MAX_DERIVED_TERMS) -> tuple[str, ...]:
+    """Terms worth grepping for, taken from a sentence a human wrote.
+
+    Identifiers come first and are kept verbatim: ``compute_total``, ``Ledger``,
+    ``parser.decode`` are the words that actually locate code, and a user who
+    names one is telling us exactly where to look. Ordinary prose contributes
+    only what survives a stopword list, because grepping for "fix" or "projet"
+    selects the whole repository, which is no selection at all.
+
+    Returns an empty tuple when the objective says nothing greppable; the
+    caller then falls back to the file tree rather than to a random file.
+    """
+    identifiers: list[str] = []
+    words: list[str] = []
+    seen: set[str] = set()
+
+    for raw in _WORD_RE.findall(objective):
+        key = raw.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        # Shaped like code rather than like prose: snake_case, camelCase, a
+        # dotted path, or a digit. These are worth searching whatever they mean.
+        if "_" in raw or "." in raw or any(c.isdigit() for c in raw) or raw[1:] != raw[1:].lower():
+            identifiers.append(raw)
+        elif len(raw) >= 4 and key not in _STOPWORDS:
+            words.append(raw)
+
+    return tuple((identifiers + words)[:limit])
 
 
 def _read_text(path: Path, max_bytes: int) -> str | None:

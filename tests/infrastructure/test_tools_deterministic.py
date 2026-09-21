@@ -564,3 +564,77 @@ def test_the_token_estimate_is_documented_and_crude() -> None:
     assert estimate_tokens("") == 0
     assert estimate_tokens("abcd") == 1
     assert estimate_tokens("abcde") == 2
+
+
+async def test_an_objective_alone_still_finds_the_relevant_code(
+    workspace: WorkspaceHandle, sandbox: SubprocessSandboxExecutor
+) -> None:
+    """The shape production actually sends, and the defect that shape hid.
+
+    Every other test here hands the provider an explicit ``queries``. The only
+    caller in production hands it neither ``queries`` nor ``paths`` — just the
+    objective — and the ranker never read the objective. Agents were given a
+    list of filenames and no code at all, and invented the rest.
+    """
+    provider = RipgrepRepositoryContextProvider(sandbox=sandbox)
+
+    context = await provider.build(
+        workspace=workspace,
+        request=ContextRequest(objective="fix compute_total in the ledger"),
+    )
+
+    assert context.excerpts, "the agents were handed a file tree and no code"
+    assert "compute_total" in context.render()
+    assert context.estimated_tokens > 0
+
+
+async def test_prose_around_the_terms_does_not_drown_them(
+    workspace: WorkspaceHandle, sandbox: SubprocessSandboxExecutor
+) -> None:
+    """An objective is a sentence, not a query. Common words must not rank."""
+    provider = RipgrepRepositoryContextProvider(sandbox=sandbox)
+
+    context = await provider.build(
+        workspace=workspace,
+        request=ContextRequest(
+            objective="Please could you have a look at the Ledger class and fix it",
+        ),
+    )
+
+    paths = [excerpt.path for excerpt in context.excerpts]
+    assert paths, "nothing matched an objective made mostly of filler"
+    assert any("app.py" in path for path in paths), paths
+
+
+async def test_an_objective_in_another_language_still_matches_identifiers(
+    workspace: WorkspaceHandle, sandbox: SubprocessSandboxExecutor
+) -> None:
+    """Objectives are written by the user, in the user's language.
+
+    The identifiers in them are not translated, so matching must not depend on
+    the surrounding prose being English.
+    """
+    provider = RipgrepRepositoryContextProvider(sandbox=sandbox)
+
+    context = await provider.build(
+        workspace=workspace,
+        request=ContextRequest(objective="Corrige la fonction compute_total du projet"),
+    )
+
+    assert context.excerpts
+    assert "compute_total" in context.render()
+
+
+async def test_explicit_queries_still_win_over_the_objective(
+    workspace: WorkspaceHandle, sandbox: SubprocessSandboxExecutor
+) -> None:
+    """The objective is a fallback, never an override: a caller that knows
+    what to look for must not have its query diluted."""
+    provider = RipgrepRepositoryContextProvider(sandbox=sandbox)
+
+    context = await provider.build(
+        workspace=workspace,
+        request=ContextRequest(objective="rewrite the readme", queries=("compute_total",)),
+    )
+
+    assert [excerpt.path for excerpt in context.excerpts][0].endswith(("app.py", "util.c"))
