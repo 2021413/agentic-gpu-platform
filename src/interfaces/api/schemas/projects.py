@@ -86,6 +86,28 @@ class CreateProjectRequest(BaseModel):
         )
 
 
+class ToolchainResponse(BaseModel):
+    """The commands this project runs against the caller's code."""
+
+    language: str
+    build_command: str | None
+    test_command: str | None
+    static_analysis_command: str | None
+    install_command: str | None
+    working_subdirectory: str | None
+
+    @classmethod
+    def of(cls, toolchain: ToolchainConfig) -> ToolchainResponse:
+        return cls(
+            language=toolchain.language,
+            build_command=toolchain.build_command,
+            test_command=toolchain.test_command,
+            static_analysis_command=toolchain.static_analysis_command,
+            install_command=toolchain.install_command,
+            working_subdirectory=toolchain.working_subdirectory,
+        )
+
+
 class ProjectResponse(BaseModel):
     """A registered project."""
 
@@ -95,6 +117,7 @@ class ProjectResponse(BaseModel):
     default_branch: str
     language: str
     created_at: datetime
+    toolchain: ToolchainResponse
 
     @classmethod
     def of(cls, view: ProjectView) -> ProjectResponse:
@@ -105,4 +128,5 @@ class ProjectResponse(BaseModel):
             default_branch=view.default_branch,
             language=view.language,
             created_at=view.created_at,
+            toolchain=ToolchainResponse.of(view.toolchain),
         )

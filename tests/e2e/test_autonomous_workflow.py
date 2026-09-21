@@ -235,3 +235,24 @@ async def test_the_reserve_reaches_both_the_scheduler_and_the_engine(
 
     # The scheduler's arithmetic.
     assert container.orchestrator._config.reserved_output_tokens == reserve
+
+
+async def test_a_project_says_which_commands_it_will_run(
+    client: httpx.AsyncClient, sample_repository: Path
+) -> None:
+    """A project executes shell commands against your code, unseen.
+
+    The build and test commands were persisted and used — validation ran them —
+    but no route ever showed them. So there was no way to answer "what is this
+    project about to execute on my machine", and no way to notice that a
+    project created earlier kept commands you have since changed.
+    """
+    created = await create_project(client, sample_repository)
+
+    detail = await client.get(f"/v1/projects/{created['id']}")
+    assert detail.status_code == 200, detail.text
+    toolchain = detail.json()["toolchain"]
+
+    assert toolchain["language"] == "python"
+    assert toolchain["build_command"] == "/bin/true"
+    assert toolchain["test_command"] == "/bin/true"

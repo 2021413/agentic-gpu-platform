@@ -13,7 +13,7 @@ from datetime import datetime
 
 from domain.entities.candidate import Candidate
 from domain.entities.plan import Plan
-from domain.entities.project import Project
+from domain.entities.project import Project, ToolchainConfig
 from domain.entities.run import Run
 from domain.entities.worker import Worker
 from domain.enums import CandidateStatus, FailureKind, ReviewVerdict, RunStatus, WorkerStatus
@@ -38,6 +38,14 @@ class ProjectView:
     default_branch: str
     language: str
     created_at: datetime
+    toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
+    """Carried whole, not just its language.
+
+    A project runs these commands against the caller's code. They were stored
+    and executed but never shown, so there was no way to answer "what is this
+    about to run", nor to notice that a project created earlier kept commands
+    that have since changed — a project's toolchain is fixed at creation.
+    """
 
     @classmethod
     def of(cls, project: Project) -> ProjectView:
@@ -48,6 +56,7 @@ class ProjectView:
             default_branch=project.default_branch,
             language=project.toolchain.language,
             created_at=project.created_at,
+            toolchain=project.toolchain,
         )
 
 
