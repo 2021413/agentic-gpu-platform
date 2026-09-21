@@ -59,6 +59,15 @@ class MaintenanceLoop:
 
     async def tick(self) -> Sequence[JobId]:
         """One maintenance pass. Returns the jobs that were made retryable."""
+        if self._orchestrator is not None:
+            # Creating a run and scheduling it are two different things: the API
+            # persists the run and answers immediately rather than holding a
+            # client on a GPU. Without this sweep a run created over HTTP stayed
+            # in CREATED forever, and the API could accept work it never did.
+            started = await self._orchestrator.start_pending_runs()
+            if started:
+                _log.info("started %d run(s) that were waiting to be scheduled", len(started))
+
         reaped = await self._reaper.execute()
         if reaped:
             _log.info("declared %d worker(s) unavailable after heartbeat timeout", len(reaped))

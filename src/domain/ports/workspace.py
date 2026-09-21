@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
 from domain.entities.project import Project
@@ -39,6 +39,18 @@ class WorkspaceManager(Protocol):
 
     async def apply_patch(self, handle: WorkspaceHandle, patch: Patch) -> None:
         """Apply a patch to a writable workspace. Fails cleanly on conflict."""
+        ...
+
+    async def write_files(self, handle: WorkspaceHandle, files: Mapping[str, str]) -> Sequence[str]:
+        """Write whole files into a writable workspace, creating directories.
+
+        The counterpart of ``apply_patch`` for a coder that answers with file
+        contents rather than a diff — which is the reliable form, since git then
+        computes the diff from what is actually on disk instead of trusting hunk
+        headers a model had to get exactly right.
+
+        Paths are relative to the workspace and must stay inside it.
+        """
         ...
 
     async def commit(self, handle: WorkspaceHandle, *, message: str) -> str:

@@ -54,6 +54,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     API_HOST=0.0.0.0 \
     API_PORT=8000
 
+# The orchestrator's own tools. Not optional extras: it creates a git worktree
+# per candidate, so without git every run fails on its first job with
+# "git could not be executed" — which is exactly what happened the first time
+# a run was driven through the HTTP API rather than through the tests.
+#
+# ripgrep is what the repository-context provider prefers; it falls back to
+# grep, so it is a speed choice rather than a requirement.
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y git ripgrep ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && git --version && rg --version | head -1
+
 # Unprivileged account: the control plane never needs root, and agent-produced
 # code must never be one misconfiguration away from it.
 RUN groupadd --gid 10001 app \

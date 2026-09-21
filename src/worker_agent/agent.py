@@ -125,8 +125,14 @@ class WorkerAgent:
         """
         if self._worker_id is None:
             return False
+        # Flat, not nested under "load". The domain command carries a WorkerLoad
+        # value object, but the HTTP schema flattens it at the boundary and
+        # forbids unknown fields — so a nested payload is rejected with a 422
+        # that registration, which agrees on its shape, never reveals. The two
+        # sides were written against the same idea and never against each other.
         payload = {
-            "load": {"active_jobs": self._active_jobs, "queued_jobs": 0},
+            "active_jobs": self._active_jobs,
+            "queued_jobs": 0,
             "draining": self._status is WorkerStatus.DRAINING,
         }
         try:

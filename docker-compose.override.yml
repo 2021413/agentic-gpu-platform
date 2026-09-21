@@ -1,0 +1,16 @@
+# Local project mounting.
+#
+# The orchestrator creates git worktrees from the project it is given, so a
+# project referenced by `local_path` must be reachable from inside the api
+# container — not merely from your shell. This file bind-mounts one directory
+# from the host so `local_path` can point at it.
+#
+# Set LOCAL_PROJECT_PATH in .env to the absolute path of your project, then:
+#   make docker-up
+#
+# The mount is read-write on purpose: the accepted patch is merged back into
+# the base repository through a controlled `git merge`, and that writes.
+services:
+  api:
+    volumes:
+      - ${LOCAL_PROJECT_PATH:?set LOCAL_PROJECT_PATH in .env}:/projects/current:rw

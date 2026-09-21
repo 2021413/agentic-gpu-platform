@@ -16,6 +16,7 @@ from typing import Any
 
 from application.dto.agent_io import (
     CodeDraft,
+    FileWrite,
     FindingDraft,
     PlanDraft,
     ReviewDraft,
@@ -95,6 +96,7 @@ class StructuredOutputCodec:
         return CodeDraft(
             summary=output.summary,
             diff=output.diff,
+            files=tuple(FileWrite(path=f.path, content=f.content) for f in output.files),
             uncertainties=tuple(output.uncertainties),
         )
 

@@ -19,6 +19,7 @@ import json
 import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -28,7 +29,6 @@ from domain.enums import AgentRole, ReviewVerdict
 from domain.exceptions import StructuredOutputError
 from domain.ports.llm_provider import LLMProvider
 from domain.value_objects.llm import ChatMessage, CompletionRequest, CompletionResult, TokenUsage
-from domain.value_objects.patch import Patch
 
 __all__ = [
     "OUTPUT_MODELS",
@@ -133,15 +133,52 @@ class PlannerOutput(_StrictModel):
         return tuple(layers)
 
 
+class FileEdit(_StrictModel):
+    """One file written in full.
+
+    Preferred over a diff: a model writes a file reliably, while a unified diff
+    demands exact hunk headers and line counts it gets wrong often enough to
+    fail runs outright. git computes the diff afterwards, from the truth on
+    disk.
+    """
+
+    path: str = Field(min_length=1)
+    content: str
+
+    @field_validator("path")
+    @classmethod
+    def _stays_inside_the_workspace(cls, value: str) -> str:
+        """Refuse traversal here as well as at the filesystem boundary.
+
+        Defence in depth: the workspace manager checks containment too, but a
+        path escaping the workspace should never even reach it.
+        """
+        candidate = PurePosixPath(value)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(f"path must be relative and stay inside the workspace: {value!r}")
+        return value
+
+
 class CoderOutput(_StrictModel):
-    """Coder answer: a patch plus what the coder is unsure about."""
+    """Coder answer: the change, plus what the coder is unsure about."""
 
     task_key: str | None = None
     summary: str = Field(min_length=1)
-    diff: str = Field(min_length=1)
+    files: list[FileEdit] = Field(default_factory=list)
+    diff: str = ""
     files_changed: list[str] = Field(default_factory=list)
     commands_run: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _expresses_a_change(self) -> CoderOutput:
+        """One of the two forms must carry something."""
+        if not self.files and not self.diff.strip():
+            raise ValueError(
+                "answer with 'files': [{'path': ..., 'content': ...}] containing the "
+                "full new content of each file you change"
+            )
+        return self
 
     @field_validator("diff")
     @classmethod
@@ -152,15 +189,13 @@ class CoderOutput(_StrictModel):
         never here. This catches the common failure of a model describing its
         change in prose where a diff was required.
         """
+        if not value.strip():
+            return value
         if "diff --git " not in value and not re.search(r"^@@ .+ @@", value, re.MULTILINE):
             raise ValueError(
                 "diff must be a unified diff containing 'diff --git' or '@@' hunk headers"
             )
         return value
-
-    def to_patch(self, *, base_revision: str | None = None) -> Patch:
-        """Derive the domain patch; per-file statistics come from the diff itself."""
-        return Patch.from_unified_diff(self.diff, base_revision=base_revision)
 
 
 class ReviewerFinding(_StrictModel):

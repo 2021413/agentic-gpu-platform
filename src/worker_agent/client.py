@@ -38,10 +38,12 @@ class ControlPlaneClient:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._owns_client = client is None
+        # Kept on the instance rather than only on the client's default headers:
+        # an injected client carries its own defaults, and a token silently
+        # dropped that way turns every call into a 401 with nothing to point at.
+        self._headers = _auth_headers(service_token)
         self._client = client or httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            timeout=timeout_seconds,
-            headers=_auth_headers(service_token),
+            base_url=base_url.rstrip("/"), timeout=timeout_seconds, headers=self._headers
         )
 
     async def __aenter__(self) -> Self:
@@ -79,8 +81,9 @@ class ControlPlaneClient:
         return body if isinstance(body, dict) else {}
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        headers = {**self._headers, **(kwargs.pop("headers", None) or {})}
         try:
-            response = await self._client.request(method, path, **kwargs)
+            response = await self._client.request(method, path, headers=headers, **kwargs)
         except httpx.HTTPError as exc:
             raise ControlPlaneError(f"{method} {path} failed: {exc}") from exc
         if response.is_error:

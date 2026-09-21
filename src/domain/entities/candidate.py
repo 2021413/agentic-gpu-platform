@@ -283,6 +283,13 @@ class Candidate(Entity):
         self._repair_iterations += 1
         self._status = CandidateStatus.CODING
         self._coder_iterations += 1
+        # Discard the previous round's results. They describe code that no
+        # longer exists: keeping them made the next pass find every stage
+        # already recorded, skip validation entirely, and judge the repaired
+        # candidate on the very failure the repair was meant to fix.
+        self._validation = ValidationReport(
+            static_analysis_is_blocking=self._validation.static_analysis_is_blocking
+        )
         self.record(
             CandidateStarted(
                 occurred_at=now,

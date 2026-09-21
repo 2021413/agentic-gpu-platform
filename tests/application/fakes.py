@@ -15,7 +15,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 from uuid import UUID
 
-from application.dto.agent_io import CodeDraft, FindingDraft, PlanDraft, ReviewDraft, TaskDraft
+from application.dto.agent_io import (
+    CodeDraft,
+    FileWrite,
+    FindingDraft,
+    PlanDraft,
+    ReviewDraft,
+    TaskDraft,
+)
 from application.ports import RenderedPrompt
 from domain.entities.candidate import Candidate
 from domain.entities.job import Job
@@ -610,6 +617,10 @@ class FakeOutputCodec:
         return CodeDraft(
             summary=str(payload.get("summary", "")),
             diff=str(payload.get("diff", "")),
+            files=tuple(
+                FileWrite(path=str(f["path"]), content=str(f.get("content", "")))
+                for f in payload.get("files", [])
+            ),
             uncertainties=tuple(payload.get("uncertainties", ())),
             done=bool(payload.get("done", True)),
         )
@@ -648,6 +659,7 @@ class FakeWorkspaceManager:
         self._ids = ids
         self.handles: dict[WorkspaceId, WorkspaceHandle] = {}
         self.patches: dict[WorkspaceId, Patch] = {}
+        self.written: dict[WorkspaceId, dict[str, str]] = {}
         self.integrated: list[WorkspaceId] = []
         self.released: list[WorkspaceId] = []
 
@@ -681,6 +693,20 @@ class FakeWorkspaceManager:
 
     async def diff(self, handle: WorkspaceHandle) -> Patch:
         return self.patches.get(handle.id, Patch(diff=""))
+
+    async def write_files(self, handle: WorkspaceHandle, files: Mapping[str, str]) -> Sequence[str]:
+        if not handle.is_writable:
+            raise AssertionError(f"{handle.role} workspaces are read-only")
+        self.written.setdefault(handle.id, {}).update(files)
+        # git would compute this; the double derives an equivalent patch so the
+        # candidate carries a non-empty diff exactly as the real one does.
+        body = "".join(
+            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+            + "".join(f"+{line}\n" for line in content.splitlines())
+            for path, content in files.items()
+        )
+        self.patches[handle.id] = Patch.from_unified_diff(body)
+        return tuple(files)
 
     async def apply_patch(self, handle: WorkspaceHandle, patch: Patch) -> None:
         if not handle.is_writable:

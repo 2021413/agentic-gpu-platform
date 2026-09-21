@@ -59,16 +59,22 @@ async def test_the_planner_answer_is_a_valid_acyclic_plan() -> None:
     assert set(layers[1]) == {"implement", "cover"}
 
 
-async def test_the_coder_answer_is_a_valid_unified_diff() -> None:
+async def test_the_coder_answer_carries_whole_files() -> None:
+    """The double answers in the shape the prompt asks for, not a diff.
+
+    It used to emit a unified diff — the exact form a real model got wrong
+    twice in a row, failing a run with "No valid patches in input". A double
+    that answers in a form the real one struggles with proves the wrong thing.
+    """
     provider = FakeLLMProvider()
     parser = StructuredOutputParser(CoderOutput)
 
     completion = await parser.complete(provider, role_request(AgentRole.CODER))
 
-    patch = completion.value.to_patch()
-    assert patch.changed_paths == ("src/add_retries_to_the_uploader.py",)
-    assert patch.total_churn > 0
-    assert not patch.is_empty
+    files = completion.value.files
+    assert [f.path for f in files] == ["src/add_retries_to_the_uploader.py"]
+    assert files[0].content.strip(), "the file was written empty"
+    assert "def " in files[0].content
 
 
 async def test_the_reviewer_answer_passes_by_default() -> None:
@@ -153,7 +159,7 @@ async def test_the_role_falls_back_to_the_prompt_marker() -> None:
 
     result = await provider.complete(role_request(AgentRole.CODER))
 
-    assert "diff" in json.loads(result.content)
+    assert "files" in json.loads(result.content)
 
 
 async def test_the_default_role_is_the_last_resort() -> None:

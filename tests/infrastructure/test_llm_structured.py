@@ -109,16 +109,6 @@ def test_a_coder_answer_must_carry_a_real_diff() -> None:
         parser.parse(json.dumps(prose))
 
 
-def test_a_coder_answer_converts_to_a_domain_patch() -> None:
-    output = CoderOutput.model_validate({"summary": "done", "diff": DIFF})
-
-    patch = output.to_patch(base_revision="abc123")
-
-    assert patch.changed_paths == ("a.py",)
-    assert patch.total_churn == 2
-    assert patch.base_revision == "abc123"
-
-
 def test_a_failing_review_must_be_actionable() -> None:
     parser = StructuredOutputParser(ReviewerOutput)
 

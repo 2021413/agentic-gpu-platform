@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import shutil
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -168,6 +168,20 @@ class GitWorktreeWorkspaceManager:
         await self._git.run(
             "apply", "--whitespace=nowarn", "-", cwd=record.path, stdin=diff, check=True
         )
+
+    async def write_files(self, handle: WorkspaceHandle, files: Mapping[str, str]) -> Sequence[str]:
+        """Write whole files into a writable workspace.
+
+        Every path is resolved and checked to stay inside the workspace before
+        anything is written: a coder's answer is untrusted input, and a path of
+        ``../../etc/something`` must not reach the filesystem. Symlinks are
+        resolved first, so a link pointing outside cannot be used as a bypass.
+        """
+        if not handle.is_writable:
+            raise WorkspaceError(f"{handle.role} workspaces are read-only", path=handle.path)
+        # One thread hop for the whole batch: resolving and writing are both
+        # blocking, and doing them one call at a time would pay the hop per file.
+        return await asyncio.to_thread(_write_all, Path(handle.path), files)
 
     async def commit(self, handle: WorkspaceHandle, *, message: str) -> str:
         """Commit everything in the workspace and return the resulting revision.
@@ -355,7 +369,21 @@ class GitWorktreeWorkspaceManager:
             base = await asyncio.to_thread(_resolve, Path(project.local_path))
             probe = await self._git.run("rev-parse", "--git-dir", cwd=base, check=False)
             if not probe.succeeded:
-                raise WorkspaceError("project local_path is not a git repository", path=str(base))
+                # Quote git rather than paraphrase it. "not a git repository"
+                # was reported for a perfectly good repository whose real
+                # problem was ownership, and the useful sentence was the one
+                # being swallowed.
+                detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+                raise WorkspaceError(
+                    "project local_path is not a usable git repository"
+                    + (f": {detail[0]}" if detail else ""),
+                    path=str(base),
+                    hint=(
+                        "run `git init` there if it is not a repository; if git "
+                        "reports dubious ownership, the control plane runs as a "
+                        "different uid than the mounted project owner"
+                    ),
+                )
             return base
         if not project.repository_url:  # pragma: no cover - forbidden by Project.__post_init__
             raise WorkspaceError("project has neither a local path nor a repository url")
@@ -418,3 +446,31 @@ def _resolve(path: Path) -> Path:
 def _remove_if_empty(path: Path) -> None:
     with contextlib.suppress(OSError):
         path.rmdir()
+
+
+def _write_all(root: Path, files: Mapping[str, str]) -> tuple[str, ...]:
+    """Write every file, refusing any path that escapes the workspace.
+
+    A coder's answer is untrusted input: a path of ``../../etc/something`` must
+    never reach the filesystem. Paths are resolved first, so a symlink pointing
+    outside cannot be used as a bypass either.
+    """
+    base = root.resolve()
+    # Two passes on purpose: every path is checked before the first byte is
+    # written, so a batch containing one bad path leaves the workspace exactly
+    # as it was instead of half-applied.
+    targets: list[tuple[str, Path]] = []
+    for relative in files:
+        target = (base / relative).resolve()
+        if target != base and base not in target.parents:
+            raise WorkspaceError(
+                f"refusing to write outside the workspace: {relative!r}", path=str(root)
+            )
+        targets.append((relative, target))
+
+    written: list[str] = []
+    for relative, target in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(files[relative], encoding="utf-8")
+        written.append(relative)
+    return tuple(written)

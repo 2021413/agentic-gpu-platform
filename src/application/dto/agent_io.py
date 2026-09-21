@@ -16,6 +16,7 @@ from domain.enums import ReviewVerdict
 
 __all__ = [
     "CodeDraft",
+    "FileWrite",
     "FindingDraft",
     "PlanDraft",
     "ReviewDraft",
@@ -59,22 +60,45 @@ class ToolRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class FileWrite:
+    """A file the coder wants written, in full."""
+
+    path: str
+    content: str
+
+    def __post_init__(self) -> None:
+        if not self.path.strip():
+            raise ValueError("a file write needs a path")
+
+
+@dataclass(frozen=True, slots=True)
 class CodeDraft:
     """Coder output.
 
-    ``diff`` may be empty when the coder only wants tools executed first; the
-    orchestrator then runs them and re-prompts, bounded by the iteration budget.
+    Two ways to express a change, and the order matters. ``files`` carries whole
+    file contents and is preferred: a model writes a file reliably, while a
+    unified diff demands exact hunk headers and line counts that it gets wrong
+    often enough to fail runs. When files are given, the orchestrator writes
+    them and lets git compute the real diff.
+
+    ``diff`` remains for a model that produced a valid patch anyway. Both may be
+    empty when the coder only wants tools executed first.
     """
 
     summary: str = ""
     diff: str = ""
+    files: tuple[FileWrite, ...] = ()
     uncertainties: tuple[str, ...] = ()
     tool_requests: tuple[ToolRequest, ...] = ()
     done: bool = True
 
     @property
+    def has_changes(self) -> bool:
+        return bool(self.files) or bool(self.diff.strip())
+
+    @property
     def wants_tools(self) -> bool:
-        return bool(self.tool_requests) and not self.diff.strip()
+        return bool(self.tool_requests) and not self.has_changes
 
 
 @dataclass(frozen=True, slots=True)
