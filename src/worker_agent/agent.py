@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from domain.enums import AgentRole, WorkerStatus
@@ -108,7 +108,8 @@ class WorkerAgent:
             )
 
         self._status = WorkerStatus.REGISTERING
-        body = await self._client.register(self._description.as_payload())
+        description = await self._reconcile_context_length()
+        body = await self._client.register(description.as_payload())
         worker_id = str(body.get("id") or self._description.worker_id or "")
         if not worker_id:
             raise ControlPlaneError("the control plane did not return a worker id")
@@ -116,6 +117,28 @@ class WorkerAgent:
         self._status = WorkerStatus.READY
         _log.info("registered as worker %s (model %s)", worker_id, self._description.model_id)
         return worker_id
+
+    async def _reconcile_context_length(self) -> WorkerDescription:
+        """Advertise what the engine serves, not what this process was told.
+
+        The declared length comes from settings and defaults to the model's
+        native context; the engine is started with its own MAX_MODEL_LEN.
+        Nothing reconciled the two, so the control plane scheduled prompts that
+        the engine answers with a 400. Asking it is one HTTP call at startup.
+
+        An engine that does not report a length leaves the declared value
+        alone: an unknown is not a reason to invent a smaller number.
+        """
+        served = await self._probe.served_context_length()
+        if served is None or served == self._description.context_length:
+            return self._description
+        _log.warning(
+            "declared context length %d, but the engine serves %d; advertising the latter",
+            self._description.context_length,
+            served,
+        )
+        self._description = replace(self._description, context_length=served)
+        return self._description
 
     async def beat_once(self) -> bool:
         """Send one heartbeat. Returns False when the beat could not be delivered.

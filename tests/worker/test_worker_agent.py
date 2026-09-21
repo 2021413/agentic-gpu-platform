@@ -8,6 +8,7 @@ leave without stranding work.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -16,6 +17,7 @@ import pytest
 from domain.enums import AgentRole, WorkerStatus
 from worker_agent.agent import WorkerAgent, WorkerDescription
 from worker_agent.client import ControlPlaneClient, ControlPlaneError
+from worker_agent.inference import InferenceProbe
 
 DESCRIPTION = WorkerDescription(
     endpoint="http://worker:8000",
@@ -53,23 +55,56 @@ class FakeControlPlane:
         self.deregistered.append(worker_id)
 
 
-class FakeProbe:
+class FakeProbe(InferenceProbe):
+    """Stands in for the GPU server, and only for that.
+
+    Subclassed rather than duck-typed so it cannot drift from the real probe's
+    surface: when `served_context_length` was added, every test using this
+    class failed loudly instead of the double quietly not having it.
+    """
+
     def __init__(self, *, healthy: bool = True, ready: bool = True) -> None:
+        super().__init__(base_url="http://inference.invalid")
         self.healthy = healthy
         self.ready = ready
 
     async def is_healthy(self) -> bool:
         return self.healthy
 
-    async def wait_until_ready(self, *, timeout_seconds: float = 900.0, **_: object) -> bool:
+    async def wait_until_ready(
+        self, *, timeout_seconds: float = 900.0, poll_seconds: float = 3.0
+    ) -> bool:
         return self.ready
 
+    async def served_context_length(self) -> int | None:
+        """Declines to say, so the declared value is kept — see ServedLengthProbe."""
+        return None
 
-def build(control_plane: FakeControlPlane, probe: FakeProbe) -> WorkerAgent:
+
+class ServedLengthProbe(FakeProbe):
+    """Healthy, and says what the engine serves — or declines to say."""
+
+    def __init__(self, served: int | None) -> None:
+        super().__init__()
+        self._served = served
+
+    async def served_context_length(self) -> int | None:
+        return self._served
+
+
+def build(
+    control_plane: FakeControlPlane,
+    probe: FakeProbe,
+    *,
+    context_length: int | None = None,
+) -> WorkerAgent:
+    description = DESCRIPTION
+    if context_length is not None:
+        description = replace(DESCRIPTION, context_length=context_length)
     return WorkerAgent(
         client=control_plane,  # type: ignore[arg-type]
-        probe=probe,  # type: ignore[arg-type]
-        description=DESCRIPTION,
+        probe=probe,
+        description=description,
         heartbeat_interval_seconds=0.01,
         drain_timeout_seconds=0.05,
     )
@@ -248,3 +283,78 @@ async def test_an_empty_token_sends_no_authorization_header() -> None:
         await plane.drain("worker-1")
 
     assert "authorization" not in seen[0]
+
+
+# ---------------------------------------------------------------------------
+# What the worker advertises.
+#
+# The agent declared `context_length` from its own settings, which default to
+# the model's *native* 262144. vLLM is started with MAX_MODEL_LEN, 16384 by
+# default. Nothing reconciled the two, so the control plane believed every
+# worker had sixteen times the room it had, and `fits` waved through prompts
+# the engine answers with a 400.
+# ---------------------------------------------------------------------------
+
+
+def models_response(max_model_len: int) -> httpx.Response:
+    """The shape vLLM's /v1/models actually returns."""
+    return httpx.Response(
+        200,
+        json={
+            "object": "list",
+            "data": [
+                {
+                    "id": "qwen3-coder",
+                    "object": "model",
+                    "owned_by": "vllm",
+                    "max_model_len": max_model_len,
+                }
+            ],
+        },
+    )
+
+
+async def test_the_probe_reads_the_context_length_the_engine_serves() -> None:
+    probe = InferenceProbe(
+        base_url="http://gpu:8000",
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: models_response(16_384)),
+            base_url="http://gpu:8000",
+        ),
+    )
+
+    assert await probe.served_context_length() == 16_384
+
+
+async def test_an_engine_that_does_not_say_is_not_guessed_at() -> None:
+    """Silence must read as "unknown", never as a comfortable default."""
+    probe = InferenceProbe(
+        base_url="http://gpu:8000",
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, json={"object": "list", "data": [{"id": "m"}]})
+            ),
+            base_url="http://gpu:8000",
+        ),
+    )
+
+    assert await probe.served_context_length() is None
+
+
+async def test_registration_advertises_what_the_engine_serves_not_what_was_configured() -> None:
+    """The defect: 262144 declared, 16384 served, nothing reconciling them."""
+    plane = FakeControlPlane()
+    agent = build(plane, ServedLengthProbe(16_384), context_length=262_144)
+
+    await agent.start()
+
+    assert plane.registrations[-1]["context_length"] == 16_384
+
+
+async def test_an_engine_that_does_not_say_leaves_the_declared_value_alone() -> None:
+    plane = FakeControlPlane()
+    agent = build(plane, ServedLengthProbe(None), context_length=262_144)
+
+    await agent.start()
+
+    assert plane.registrations[-1]["context_length"] == 262_144

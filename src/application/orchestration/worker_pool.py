@@ -97,3 +97,32 @@ class WorkerPool:
         """Free slots across the pool, used to size candidate fan-out."""
         available = await self._registry.list_available()
         return sum(w.available_slots for w in available if w.can_accept(requirements))
+
+    async def prompt_budget(self, requirements: JobRequirements) -> int | None:
+        """How large a prompt the fleet can actually take for this job.
+
+        The roomiest worker sets it, because a prompt only has to fit
+        *somewhere* and the scheduler will route it there; the narrowest must
+        not cap what the others could hold.
+
+        ``None`` when nothing registered can serve the role. That has to stay
+        distinguishable from a number: the caller then falls back to its own
+        configured ceiling rather than to an invented one, which is exactly how
+        a 262144 declaration ended up in front of a 16384 engine.
+
+        Load is ignored on purpose. This answers "how much room exists", not
+        "who is free now" — a busy worker still bounds what is worth building.
+        """
+        workers = [
+            w
+            for w in await self._registry.list_available()
+            if w.capabilities.supports_role(requirements.role)
+        ]
+        if not workers:
+            return None
+        return max(
+            w.capabilities.usable_prompt_tokens(
+                reserved_output_tokens=requirements.reserved_output_tokens
+            )
+            for w in workers
+        )

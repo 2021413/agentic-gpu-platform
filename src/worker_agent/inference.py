@@ -79,6 +79,38 @@ class InferenceProbe:
             await asyncio.sleep(poll_seconds)
         return False
 
+    async def served_context_length(self) -> int | None:
+        """The context window the engine is actually serving, or ``None``.
+
+        vLLM reports ``max_model_len`` on its model card, and that is the only
+        number that matters to the scheduler: the model's native context is
+        what it *could* serve, while MAX_MODEL_LEN is what this process *will*
+        accept. Declaring the former made the control plane believe in sixteen
+        times the room it had.
+
+        ``None`` means the engine did not say. That must stay distinguishable
+        from a number, because guessing here is how the two sides drifted apart
+        in the first place.
+        """
+        try:
+            response = await self._client.get("/v1/models")
+        except httpx.HTTPError:
+            return None
+        if not response.is_success:
+            return None
+        try:
+            models = response.json().get("data") or []
+        except ValueError:
+            return None
+        lengths = [
+            int(card["max_model_len"])
+            for card in models
+            if isinstance(card, dict) and isinstance(card.get("max_model_len"), int)
+        ]
+        # The smallest, when several are served: a job routed to this endpoint
+        # may land on any of them, so the honest capacity is the narrowest.
+        return min(lengths) if lengths else None
+
     async def active_requests(self) -> int | None:
         """Best-effort occupancy. ``None`` when the engine does not report it,
         in which case the control plane relies on its own accounting."""

@@ -100,6 +100,15 @@ class OrchestratorConfig:
     job_max_attempts: int = 3
     context_max_files: int = 40
     context_max_tokens: int = 24_000
+    """Ceiling on the repository view. The fleet lowers it; nothing raises it."""
+    reserved_output_tokens: int = 4_096
+    """Room kept in the window for the answer.
+
+    Sized for the coder, which is the only role that writes whole files back —
+    a diff of a few lines costs a fraction of this, a rewritten module does
+    not. Too small and the reply is truncated mid-JSON, which reaches the
+    repair loop as malformed JSON rather than as "you ran out of room".
+    """
     validation_timeout_seconds: float = 900.0
     static_analysis_is_blocking: bool = False
     integrate_on_success: bool = True
@@ -271,11 +280,13 @@ class RunOrchestrator:
         )
         try:
             context = await self._context.build(
-                workspace=workspace, request=self._context_request(run.objective)
+                workspace=workspace,
+                request=await self._context_request(run.objective, role=AgentRole.PLANNER),
             )
             requirements = JobRequirements(
                 role=AgentRole.PLANNER,
                 estimated_prompt_tokens=context.estimated_tokens,
+                reserved_output_tokens=self._config.reserved_output_tokens,
             )
             async with self._pool.acquire(requirements) as acquired:
                 outcome = await self._planner.plan(
@@ -331,7 +342,8 @@ class RunOrchestrator:
 
         workspace = await self._require_workspace(candidate)
         context = await self._context.build(
-            workspace=workspace, request=self._context_request(run.objective)
+            workspace=workspace,
+            request=await self._context_request(run.objective, role=AgentRole.CODER),
         )
         repair_brief = reviews[-1].repair_brief() if reviews else None
 
@@ -339,6 +351,7 @@ class RunOrchestrator:
             role=AgentRole.CODER,
             estimated_prompt_tokens=context.estimated_tokens,
             requires_tools=True,
+            reserved_output_tokens=self._config.reserved_output_tokens,
         )
         async with self._pool.acquire(requirements) as acquired:
             outcome = await self._coder.code(
@@ -455,7 +468,10 @@ class RunOrchestrator:
             plan = await uow.plans.latest_for_run(run.id)
             previous = await uow.reviews.list_by_candidate(candidate_id)
 
-        requirements = JobRequirements(role=AgentRole.REVIEWER)
+        requirements = JobRequirements(
+            role=AgentRole.REVIEWER,
+            reserved_output_tokens=self._config.reserved_output_tokens,
+        )
         async with self._pool.acquire(requirements) as acquired:
             outcome = await self._reviewer.review(
                 provider=acquired.provider,
@@ -859,11 +875,33 @@ class RunOrchestrator:
         for job in jobs:
             await self._queue.enqueue(job)
 
-    def _context_request(self, objective: str) -> ContextRequest:
+    async def _context_request(self, objective: str, *, role: AgentRole) -> ContextRequest:
+        """Size the repository view against what the fleet can actually hold.
+
+        The configured ceiling was 24000 while the engines were served with
+        MAX_MODEL_LEN=16384: the orchestrator asked for a view no worker could
+        take, and the scheduler — which does check — would have refused the job
+        the moment the context stopped being empty. Two numbers that had to
+        agree, in two packages that never spoke.
+
+        The fleet only ever lowers the ceiling. An empty fleet leaves it alone:
+        there is nothing to learn from, and guessing is what caused this.
+        """
+        budget = await self._pool.prompt_budget(
+            JobRequirements(role=role, reserved_output_tokens=self._config.reserved_output_tokens)
+        )
+        max_tokens = self._config.context_max_tokens
+        if budget is not None and budget < max_tokens:
+            _log.debug(
+                "context budget lowered from %d to %d by the fleet's context window",
+                max_tokens,
+                budget,
+            )
+            max_tokens = budget
         return ContextRequest(
             objective=objective,
             max_files=self._config.context_max_files,
-            max_tokens=self._config.context_max_tokens,
+            max_tokens=max_tokens,
         )
 
     async def _require_workspace(self, candidate: Candidate) -> WorkspaceHandle:

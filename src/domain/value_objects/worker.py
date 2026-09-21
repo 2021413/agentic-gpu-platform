@@ -85,9 +85,28 @@ class WorkerCapabilities:
     def supports_role(self, role: AgentRole) -> bool:
         return role in self.supported_roles
 
-    def fits(self, estimated_tokens: int) -> bool:
-        """Whether a prompt of that size plausibly fits this worker's context window."""
-        return estimated_tokens <= self.context_length
+    def usable_prompt_tokens(self, *, reserved_output_tokens: int) -> int:
+        """How much of the window a prompt may occupy, once the reply is kept out.
+
+        Never negative: a reserve wider than the window means nothing fits, and
+        that must read as zero rather than as a negative budget a caller would
+        pass on to a slice.
+        """
+        return max(0, self.context_length - reserved_output_tokens)
+
+    def fits(self, requirements: JobRequirements) -> bool:
+        """Whether that job's prompt fits, with room left to answer.
+
+        The comparison used to be against the whole window, so a prompt of
+        exactly the context length "fitted" with nothing left to reply with.
+        The engine answers that with a 400, or truncates the reply mid-JSON —
+        which reaches the repair loop as malformed JSON, a cause it can do
+        nothing about.
+        """
+        budget = self.usable_prompt_tokens(
+            reserved_output_tokens=requirements.reserved_output_tokens
+        )
+        return requirements.estimated_prompt_tokens <= budget
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,9 +136,12 @@ class JobRequirements:
     role: AgentRole
     model_id: str | None = None
     estimated_prompt_tokens: int = 0
+    reserved_output_tokens: int = 0
     requires_tools: bool = False
     requires_json_schema: bool = True
 
     def __post_init__(self) -> None:
         if self.estimated_prompt_tokens < 0:
             raise ValueError("estimated_prompt_tokens must not be negative")
+        if self.reserved_output_tokens < 0:
+            raise ValueError("reserved_output_tokens must not be negative")

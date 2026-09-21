@@ -637,4 +637,5 @@ async def test_explicit_queries_still_win_over_the_objective(
         request=ContextRequest(objective="rewrite the readme", queries=("compute_total",)),
     )
 
-    assert [excerpt.path for excerpt in context.excerpts][0].endswith(("app.py", "util.c"))
+    first = next(excerpt.path for excerpt in context.excerpts)
+    assert first.endswith(("app.py", "util.c")), first
