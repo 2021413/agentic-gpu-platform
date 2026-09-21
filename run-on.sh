@@ -54,7 +54,7 @@ curl -fsS -m5 "$API/health" >/dev/null || die "the control plane did not come ba
 
 # 3. Toolchain. Guessed from what is in the repository, never silently: a wrong
 #    build command reported as a code defect would poison the repair loop.
-name="$(basename "$project_path")"
+name="${NAME:-$(basename "$project_path")}"
 
 # Does the Makefile actually define that target? A build command that fails
 # because the target does not exist marks every candidate non-viable for a
@@ -92,26 +92,46 @@ else
     echo "==> WARNING: no recognised project file. Build and test are left unset,"
     echo "    so validation will be recorded as SKIPPED, never as passed."
 fi
-echo "==> toolchain: $lang | build: ${build:-none} | test: ${test:-none}"
+echo "==> toolchain: $lang | build: ${BUILD-${build:-none}} | test: ${TEST-${test:-none}}"
 
-# The tools run inside a sandbox image, and that image must be able to run the
-# commands above. The default carries Python and nothing else.
-# `|| true`: grep exits 1 when the variable is absent, which under `set -e`
-# would kill the script right before the warning it is about to print.
-sandbox_image=$(grep -E '^TOOL_SANDBOX_IMAGE=' .env 2>/dev/null | cut -d= -f2- || true)
-sandbox_image=${sandbox_image:-python:3.12-slim}
-case "$lang:$sandbox_image" in
-    c:python*|cpp:python*|rust:python*|go:python*|javascript:python*)
-        echo
-        echo "==> WARNING: this is a $lang project, but the tools run in"
-        echo "    '$sandbox_image', which cannot build it. Every build would fail"
-        echo "    with 'not found' and every candidate would be judged non-viable"
-        echo "    for a reason unrelated to the code."
-        echo "    Set TOOL_SANDBOX_IMAGE in .env to an image that can build $lang"
-        echo "    (for $lang, e.g. gcc:13), then: docker compose up -d api"
-        echo
-        ;;
-esac
+# Explicit overrides win over detection, for the case where you know better.
+build=${BUILD-$build}
+test=${TEST-$test}
+
+# ... and only then ask whether they can run. Checking before the override was
+# a bug of my own making: it refused a run over a command the caller had
+# already replaced.
+# Do the commands we just chose actually exist where the tools run?
+#
+# Guessing this from the language was wrong twice over: it missed that the
+# runtime image has no compiler for a C project, and it waved through a Python
+# project whose `pytest` is equally absent. So ask, rather than assume — a
+# command that cannot start is reported as a tool failure and kills the run
+# with a reason that says nothing about the code.
+missing=""
+for cmd in "$build" "$test"; do
+    [ -n "$cmd" ] || continue
+    exe=${cmd%% *}
+    docker compose exec -T api sh -c "command -v '$exe' >/dev/null 2>&1" 2>/dev/null \
+        || missing="$missing $exe"
+done
+
+if [ -n "$missing" ]; then
+    echo
+    echo "==> WARNING: not found where the tools run:$missing"
+    echo "    Every candidate would fail on that, for a reason that has nothing"
+    echo "    to do with the code the agents write."
+    echo
+    echo "    Either install them in the image the tools use, or drop the"
+    echo "    command so validation is recorded as SKIPPED instead of failed."
+    echo
+    if [ "${STRICT_TOOLS:-1}" = "1" ]; then
+        die "refusing to spend a run on a toolchain that cannot execute.
+       Re-run with STRICT_TOOLS=0 to proceed anyway (validation will fail),
+       or set the commands yourself:
+           BUILD='...' TEST='' ./run-on.sh \"$project_path\" \"$objective\""
+    fi
+fi
 
 json_or_null() { [ -n "$1" ] && printf '"%s"' "$1" || printf 'null'; }
 
@@ -122,6 +142,30 @@ pid=$(curl -fsS -X POST "$API/v1/projects" -H 'content-type: application/json' \
                       \"test_command\":$(json_or_null "$test")}}" \
   | $PY -c 'import json,sys; print(json.load(sys.stdin)["id"])') \
   || die "could not create the project; is the control plane running? (make docker-up)"
+
+# A project's toolchain is fixed when it is created: there is no update route,
+# and creating one that already exists returns the existing record unchanged.
+# So a second run with different commands silently used the first run's — which
+# is how a run was spent executing `pytest` after the caller had replaced it.
+read_toolchain() {
+    curl -fsS "$API/v1/projects/$1" | $PY -c '
+import json, sys
+t = json.load(sys.stdin).get("toolchain") or {}
+print(t.get("build_command") or "")
+print(t.get("test_command") or "")
+'
+}
+stored_build=$(read_toolchain "$pid" | sed -n 1p)
+stored_test=$(read_toolchain "$pid" | sed -n 2p)
+
+if [ "$stored_build" != "$build" ] || [ "$stored_test" != "$test" ]; then
+    printf '\n==> the project %s already exists, with different commands:\n' "$name"
+    printf '    stored : build=%s | test=%s\n' "${stored_build:-none}" "${stored_test:-none}"
+    printf '    wanted : build=%s | test=%s\n\n' "${build:-none}" "${test:-none}"
+    die "a project's toolchain cannot be changed after creation.
+       Run it under a different project name:
+           NAME=$name-2 ./run-on.sh \"$project_path\" \"$objective\""
+fi
 
 rid=$(curl -fsS -X POST "$API/v1/projects/$pid/runs" -H 'content-type: application/json' \
   -d "$($PY -c 'import json,sys; print(json.dumps({"objective": sys.argv[1], "candidate_count": int(sys.argv[2])}))' "$objective" "${CANDIDATES:-1}")" \
