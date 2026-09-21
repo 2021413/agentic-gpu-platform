@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from domain.enums import AgentRole, WorkerStatus
 from worker_agent.agent import WorkerAgent, WorkerDescription
-from worker_agent.client import ControlPlaneError
+from worker_agent.client import ControlPlaneClient, ControlPlaneError
 
 DESCRIPTION = WorkerDescription(
     endpoint="http://worker:8000",
@@ -108,10 +109,31 @@ async def test_heartbeats_report_the_real_occupancy() -> None:
     agent.job_started()
     await agent.beat_once()
 
-    assert plane.heartbeats[-1]["load"]["active_jobs"] == 2
+    assert plane.heartbeats[-1]["active_jobs"] == 2
     agent.job_finished()
     await agent.beat_once()
-    assert plane.heartbeats[-1]["load"]["active_jobs"] == 1
+    assert plane.heartbeats[-1]["active_jobs"] == 1
+
+
+async def test_the_heartbeat_payload_matches_what_the_api_accepts() -> None:
+    """The HTTP schema is flat and forbids unknown fields.
+
+    The agent used to nest the counters under "load", mirroring the domain
+    command, and every heartbeat was rejected with a 422 — which registration,
+    agreeing on its own shape, never revealed. The worker then expired from the
+    registry 90 seconds later and jobs failed with "no compatible worker".
+    """
+    plane = FakeControlPlane()
+    agent = build(plane, FakeProbe())
+    await agent.start()
+    agent.job_started()
+
+    await agent.beat_once()
+
+    sent = plane.heartbeats[-1]
+    assert set(sent) == {"worker_id", "active_jobs", "queued_jobs", "draining"}
+    assert sent["active_jobs"] == 1
+    assert sent["draining"] is False
 
 
 async def test_an_unhealthy_engine_is_reported_rather_than_hidden() -> None:
@@ -177,3 +199,52 @@ async def test_draining_is_visible_in_the_heartbeat() -> None:
 
     assert agent.status is WorkerStatus.DRAINING
     assert plane.heartbeats[-1]["draining"] is True
+
+
+async def test_the_service_token_is_sent_even_when_the_client_is_injected() -> None:
+    """An injected client used to drop the token silently, answering 401.
+
+    ``ControlPlaneClient`` put the Authorization header on the client it built
+    itself, so passing one in — which is how a caller shares a connection pool
+    or drives the app in process — took the token as an argument and then never
+    used it. Nothing said so; every call simply came back unauthenticated.
+    """
+    seen: list[httpx.Headers] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return httpx.Response(200, json={"id": "worker-1"})
+
+    injected = httpx.AsyncClient(
+        transport=httpx.MockTransport(record), base_url="http://control-plane"
+    )
+    async with ControlPlaneClient(
+        base_url="http://control-plane", service_token="s3cret", client=injected
+    ) as plane:
+        await plane.register({"endpoint": "http://gpu:8000"})
+        await plane.heartbeat("worker-1", {"active_jobs": 0})
+
+    assert [headers.get("authorization") for headers in seen] == [
+        "Bearer s3cret",
+        "Bearer s3cret",
+    ]
+
+
+async def test_an_empty_token_sends_no_authorization_header() -> None:
+    """Local runs accept unauthenticated internal calls; an empty token must
+    not become the literal string ``Bearer ``."""
+    seen: list[httpx.Headers] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return httpx.Response(200, json={})
+
+    injected = httpx.AsyncClient(
+        transport=httpx.MockTransport(record), base_url="http://control-plane"
+    )
+    async with ControlPlaneClient(
+        base_url="http://control-plane", service_token="", client=injected
+    ) as plane:
+        await plane.drain("worker-1")
+
+    assert "authorization" not in seen[0]
