@@ -59,19 +59,23 @@ avant d'avoir mesuré : l'augmenter multiplie directement la facture GPU.
 
 ---
 
-## 3. Pas de streaming : plafond de 100 s sur le proxy HTTP RunPod
+## 3. Pas de streaming — et le plafond de 100 s a disparu avec RunPod
 
 Aucun appel `.stream()` dans la couche application. Toutes les complétions
 sont bloquantes, timeout client 600 s.
 
-- **En tunnel TCP direct** — ce qui a été utilisé et ce que fait
-  `scripts/retry-gpu-test.sh` (`--expose tcp`) — **sans objet**.
-- **Via le proxy HTTP RunPod**, Cloudflare coupe à 100 s de *lecture* : toute
-  génération plus longue devient un **524**.
+**Le plafond n'existe plus.** L'inférence passe désormais par un Modal Server,
+dont la documentation est explicite : il n'y a pas de timeout de plateforme,
+c'est le client qui fixe le sien. Les 100 s de Cloudflare et les 524
+appartenaient au proxy HTTP de RunPod. Le point reste listé pour une seule
+raison : le code de streaming existe dans l'adaptateur, documente un problème
+qui n'est plus le nôtre, et n'est toujours branché nulle part. Ce n'est plus un
+piège, c'est du code mort à décider.
 
-Le code de streaming existe dans l'adaptateur et documente correctement le
-problème. Il n'est simplement pas branché. Tant que le déploiement reste en
-TCP, ce n'est pas urgent ; c'est un piège pour quiconque passera en proxy.
+Ce que Modal impose à la place, et qui est nouveau : **un pool vide répond
+503 immédiatement**, il ne met pas en attente. C'est traité
+(`INFERENCE_SCALE_TO_ZERO`), vérifié en conditions réelles, et documenté dans
+`gpu-worker/docs/modal.md`.
 
 ---
 
@@ -87,13 +91,28 @@ deux sens. Or elle décide de deux choses :
 - le budget de contexte (combien de fichiers entrent dans le prompt) ;
 - la vérification de place du scheduler (`fits`).
 
-Avec une fenêtre de 32768 et 4096 réservés pour la réponse, une
-sous-estimation d'un tiers déborde. Le garde-fou existe — une réponse tronquée
-échoue immédiatement avec un message qui nomme le budget, au lieu de brûler
-trois générations — donc **on le verra**, mais on le verra.
+**Ce n'est plus une hypothèse.** Le premier vrai run contre le GPU est mort
+là-dessus, à un token près :
 
-La vraie correction serait de compter les tokens avec le tokenizer du modèle,
-ce qui obligerait cette couche à connaître le modèle. Non fait, délibérément.
+```
+maximum context length is 32768 tokens. However, you requested 4096 output
+tokens and your prompt contains at least 28673 input tokens
+```
+
+28672 est exactement 32768 − 4096, c'est-à-dire ce que `prompt_budget` renvoie :
+de la place pour **tout** le prompt. L'orchestrateur la donnait telle quelle au
+fournisseur de contexte comme budget de l'extrait de code, donc l'extrait
+remplissait la fenêtre entière et le gabarit — instructions, objectif, plan,
+findings accumulés, schéma JSON — la faisait déborder. Rien de tout cela
+n'était compté.
+
+Corrigé : `prompt_overhead_tokens` (2048) sort du budget de la flotte avant
+qu'il devienne un budget d'extrait, et l'arithmétique vit dans
+`OrchestratorConfig.excerpt_budget` pour qu'un test l'appelle au lieu de la
+réécrire. Ce qui **reste** vrai, c'est la cause profonde : l'estimation divise
+toujours des caractères par quatre. La vraie correction serait de compter avec
+le tokenizer du modèle, ce qui obligerait cette couche à connaître le modèle.
+Non fait, délibérément.
 
 ---
 
@@ -209,6 +228,32 @@ Ce qu'elle n'a pas :
   `dev-service-token-change-me` : elle n'est pas vide, donc elle passe. Un
   déploiement qui oublie de la changer est authentifié par un secret publié
   dans le dépôt.
+
+---
+
+## 12. Trois tentatives brûlées en quatre secondes
+
+Observé le 22 septembre au soir, sur un run réel contre la H100 Modal. Le
+worker a été déclaré indisponible par le reaper le temps qu'il se
+ré-enregistre, et le job coder a consommé ses trois tentatives à 21:20:24,
+:26 et :28 — **quatre secondes**, sans le moindre délai entre elles.
+
+```
+job ... (CODE) failed: no compatible worker is available -> RETRY_OTHER_WORKER
+job ... (CODE) failed: no compatible worker is available -> RETRY_OTHER_WORKER
+job ... (CODE) failed: no compatible worker is available -> FAIL
+```
+
+`RETRY_OTHER_WORKER` suppose qu'il existe un autre worker. Avec une flotte d'un
+seul GPU — ce que le scale-to-zero rend normal, pas exceptionnel — il n'y en a
+pas, et réessayer immédiatement trois fois revient à échouer une fois avec plus
+d'étapes. Le run avait déjà fait planifier, coder, construire et tester **deux
+candidats complets** ; il est mort sur une absence qui a duré moins d'une
+minute.
+
+Ce qu'il faudrait : un délai entre les tentatives quand l'échec est
+« aucun worker », et de préférence un délai qui tienne compte du fait qu'un
+worker peut être en train de démarrer. La correction n'est pas faite.
 
 ---
 
