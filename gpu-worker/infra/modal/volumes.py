@@ -17,6 +17,7 @@ from typing import Final
 
 import modal
 
+from infra.modal.runtime import scratch_environment
 from worker.config import PersistentLayout
 
 __all__ = [
@@ -62,5 +63,9 @@ def cache_environment() -> dict[str, str]:
     *import* time, so a process started by anything other than our entrypoint —
     `modal shell`, a health probe, an operator's `python -c "import torch"` —
     would otherwise fill the container filesystem instead of the Volume.
+
+    `TMPDIR` is the one exception, and `scratch_environment` explains why.
     """
-    return dict(layout().environment())
+    environment = dict(layout().environment())
+    environment.update(scratch_environment())
+    return environment

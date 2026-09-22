@@ -45,6 +45,7 @@ from infra.modal.runtime import (
     monotonic_ms,
     new_record,
     resolve_model,
+    scratch_environment,
 )
 from infra.modal.secrets import worker_secrets
 from infra.modal.volumes import model_cache_volume, volume_mounts
@@ -123,9 +124,14 @@ class VLLMServer:
                 os.makedirs(value, exist_ok=True)
             print(f"compiled artifacts: {compile_environment['VLLM_CACHE_ROOT']}")
 
+            # The scratch override has to be applied here too: `hub_environment`
+            # rebuilds TMPDIR from the layout, which would put vLLM's ZeroMQ
+            # sockets back on a filesystem that cannot hold them.
+            child_environment = {**compile_environment, **scratch_environment()}
+
             mark = time.monotonic()
             self._process = launch_vllm(
-                config, snapshot, extra_environment=compile_environment
+                config, snapshot, extra_environment=child_environment
             )
             record = replace(record, vllm_launch_ms=monotonic_ms(mark))
 

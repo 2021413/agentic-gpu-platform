@@ -32,7 +32,7 @@ import modal
 
 from infra.modal.volumes import DATA_ROOT, cache_environment
 
-__all__ = ["VALIDATED_MODEL_REVISION", "VLLM_IMAGE", "worker_image"]
+__all__ = ["VALIDATED_MODEL_REVISION", "VLLM_EXTRA_ARGS", "VLLM_IMAGE", "worker_image"]
 
 # The single place where the runtime is chosen. Never `latest`: a floating tag
 # silently changes CUDA, PyTorch and the kernels under a fleet that is supposed
@@ -53,6 +53,24 @@ VALIDATED_MODEL_REVISION: Final = os.environ.get(
     "MODEL_REVISION", "dcaee4d4dfc5ee71ad501f01f530e5652438fde0"
 )
 
+# Extra vLLM flags, as a shell-quoted string parsed with `shlex` by
+# `WorkerConfig`. One flag is here for a reason worth writing down.
+#
+# A Modal Volume is mounted over **9P**, and vLLM inspects the checkpoint's
+# filesystem to decide whether to overlap reads with GPU transfers:
+#
+#     Filesystem type for checkpoints: 9P. Checkpoint size: 29.03 GiB.
+#     Auto-prefetch is disabled because the filesystem (9P) is not a
+#     recognized network FS (NFS/Lustre).
+#
+# It is a network filesystem; vLLM simply has no case for this one. With
+# prefetch off, the four shards loaded serially at about 105 seconds each —
+# roughly seven minutes of an H100 billed to read a disk, about $0.46 per cold
+# start in pure I/O. Forcing the strategy is what that message asks for.
+VLLM_EXTRA_ARGS: Final = os.environ.get(
+    "VLLM_EXTRA_ARGS", "--safetensors-load-strategy=prefetch"
+)
+
 
 def _image_environment() -> dict[str, str]:
     env = {
@@ -61,6 +79,7 @@ def _image_environment() -> dict[str, str]:
         "PYTHONFAULTHANDLER": "1",
         "VLLM_IMAGE_TAG": VLLM_IMAGE,
         "MODEL_REVISION": VALIDATED_MODEL_REVISION,
+        "VLLM_EXTRA_ARGS": VLLM_EXTRA_ARGS,
         # Faster hub transfers. It only matters while the Volume is being
         # populated, on a CPU container, but the variable is read at import time
         # so it has to be in the image rather than set by the caller.

@@ -20,12 +20,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Final
 
 from worker.config import PersistentLayout, WorkerConfig
 from worker.gpu import survey_gpus
 from worker.model_state import ModelPreparationError, prepare_model, read_marker
 
 __all__ = [
+    "LOCAL_SCRATCH",
     "ColdModelError",
     "StartupRecord",
     "append_startup_record",
@@ -33,11 +35,15 @@ __all__ = [
     "gpu_slug",
     "launch_vllm",
     "resolve_model",
+    "scratch_environment",
     "startup_records",
 ]
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _STARTUP_LOG = "startup.jsonl"
+
+# The container's own disk, not the Volume.
+LOCAL_SCRATCH: Final = "/tmp"  # noqa: S108 - a container temp dir, not a shared host path
 
 
 class ColdModelError(RuntimeError):
@@ -93,6 +99,30 @@ def compile_cache_environment(
         "VLLM_CACHE_ROOT": str(root / "vllm"),
         "TRITON_CACHE_DIR": str(root / "vllm" / "triton"),
     }
+
+
+def scratch_environment() -> dict[str, str]:
+    """Temporary files belong on the container disk, never on the Volume.
+
+    `PersistentLayout` puts `TMPDIR` on the mounted volume, which is right on
+    RunPod: it keeps a download's scratch space off a container disk sized for
+    an image. On Modal it is fatal, and not for a reason anyone would guess.
+
+    vLLM talks to its engine core over **ZeroMQ IPC sockets** created under
+    `TMPDIR`. A Modal Volume is a FUSE filesystem with no support for Unix
+    domain sockets, so `socket.bind()` fails with
+
+        zmq.error.ZMQError: Operation not supported
+            (addr='ipc:///data/tmp/...')
+
+    and the engine dies about a minute into loading — after the weights have
+    started moving, which is the most expensive place to fail. Observed on the
+    first real cold start, not predicted.
+
+    Nothing is lost by moving it: the weights are fetched by the populate job,
+    not by this container, so `TMPDIR` here holds sockets and a few small files.
+    """
+    return {"TMPDIR": LOCAL_SCRATCH}
 
 
 # -- model availability -------------------------------------------------

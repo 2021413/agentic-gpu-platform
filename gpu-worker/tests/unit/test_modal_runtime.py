@@ -18,6 +18,7 @@ from infra.modal.runtime import (
     compile_cache_environment,
     new_record,
     resolve_model,
+    scratch_environment,
     startup_records,
 )
 from worker.config import PersistentLayout, WorkerConfig
@@ -145,3 +146,27 @@ def test_records_are_json_one_line_each(config: WorkerConfig, layout: Persistent
 
 def test_no_records_yet_is_not_an_error(layout: PersistentLayout) -> None:
     assert startup_records(layout) == []
+
+
+# -- scratch space ---------------------------------------------------------
+def test_temporary_files_do_not_live_on_the_volume(layout: PersistentLayout) -> None:
+    """vLLM binds ZeroMQ IPC sockets under TMPDIR, and a Modal Volume is a FUSE
+    filesystem with no Unix domain sockets. The first real cold start died on
+    `ZMQError: Operation not supported` a minute into loading the weights."""
+    tmpdir = scratch_environment()["TMPDIR"]
+
+    assert not tmpdir.startswith(str(layout.root)), (
+        "TMPDIR on the volume kills the engine after the weights start moving"
+    )
+
+
+def test_the_caches_that_must_stay_on_the_volume_still_do(
+    layout: PersistentLayout,
+) -> None:
+    """The scratch exception must not drag the expensive caches with it."""
+    environment = dict(layout.environment())
+    environment.update(scratch_environment())
+
+    on_volume = {"HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TORCH_HOME"}
+    for name in on_volume:
+        assert environment[name].startswith(str(layout.root)), name
