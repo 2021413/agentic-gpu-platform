@@ -11,9 +11,11 @@ from collections.abc import Sequence
 
 from application.dto.commands import CancelRunCommand, CreateRunCommand
 from application.dto.views import (
+    CandidatePatchView,
     CandidateView,
     EventView,
     PlanView,
+    ReviewView,
     RunDetailView,
     RunView,
 )
@@ -26,13 +28,15 @@ from domain.ports.clock import Clock, IdGenerator
 from domain.ports.event_bus import EventBus
 from domain.ports.job_queue import JobQueue
 from domain.services.task_complexity import TaskComplexityPolicy
-from domain.value_objects.identifiers import ProjectId, RunId
+from domain.value_objects.identifiers import CandidateId, ProjectId, RunId
 from domain.value_objects.limits import RunLimits
 
 __all__ = [
     "CancelRunUseCase",
     "CreateRunUseCase",
+    "GetCandidatePatchUseCase",
     "GetRunUseCase",
+    "ListReviewsUseCase",
     "ListRunEventsUseCase",
     "ListRunsUseCase",
 ]
@@ -186,8 +190,52 @@ class ListRunsUseCase:
         self, project_id: ProjectId, *, limit: int = 50, offset: int = 0
     ) -> Sequence[RunView]:
         async with self._uow_factory() as uow:
+            if await uow.projects.get(project_id) is None:
+                # An unknown project must not read as "a project with no runs".
+                raise EntityNotFoundError("Project", project_id)
             runs = await uow.runs.list_by_project(project_id, limit=limit, offset=offset)
             return [RunView.of(r) for r in runs]
+
+
+class GetCandidatePatchUseCase:
+    """The code a candidate actually wrote.
+
+    Kept out of the candidate listing on purpose: a patch is unbounded, and a
+    dashboard polling a list of candidates must not drag every diff with it.
+    """
+
+    def __init__(self, *, uow_factory: UnitOfWorkFactory) -> None:
+        self._uow_factory = uow_factory
+
+    async def execute(self, run_id: RunId, candidate_id: CandidateId) -> CandidatePatchView:
+        async with self._uow_factory() as uow:
+            candidate = await uow.candidates.get(candidate_id)
+            if candidate is None or candidate.run_id != run_id:
+                # The run check matters: a candidate id from another run must
+                # not be readable by guessing a run it does not belong to.
+                raise EntityNotFoundError("Candidate", candidate_id)
+            return CandidatePatchView.of(candidate)
+
+
+class ListReviewsUseCase:
+    """Every reviewer verdict of a run, with its findings.
+
+    Reviews are append-only evidence: a repair loop produces one per round, and
+    reading them in order is how you see what the reviewer kept objecting to.
+    """
+
+    def __init__(self, *, uow_factory: UnitOfWorkFactory) -> None:
+        self._uow_factory = uow_factory
+
+    async def execute(self, run_id: RunId) -> Sequence[ReviewView]:
+        async with self._uow_factory() as uow:
+            if await uow.runs.get(run_id) is None:
+                raise EntityNotFoundError("Run", run_id)
+            reviews: list[ReviewView] = []
+            for candidate in await uow.candidates.list_by_run(run_id):
+                for review in await uow.reviews.list_by_candidate(candidate.id):
+                    reviews.append(ReviewView.of(review))
+        return sorted(reviews, key=lambda r: (r.created_at, r.iteration))
 
 
 class ListCandidatesUseCase:

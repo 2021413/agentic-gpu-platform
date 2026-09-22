@@ -23,9 +23,12 @@ from application.use_cases.projects import (
 from application.use_cases.runs import (
     CancelRunUseCase,
     CreateRunUseCase,
+    GetCandidatePatchUseCase,
     GetRunUseCase,
     ListCandidatesUseCase,
+    ListReviewsUseCase,
     ListRunEventsUseCase,
+    ListRunsUseCase,
 )
 from application.use_cases.workers import (
     DeregisterWorkerUseCase,
@@ -60,6 +63,9 @@ class ApiDependencies:
     get_run: GetRunUseCase
     cancel_run: CancelRunUseCase
     list_candidates: ListCandidatesUseCase
+    list_runs: ListRunsUseCase
+    candidate_patch: GetCandidatePatchUseCase
+    list_reviews: ListReviewsUseCase
     list_run_events: ListRunEventsUseCase
     # workers
     list_workers: ListWorkersUseCase

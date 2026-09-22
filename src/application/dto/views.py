@@ -14,10 +14,18 @@ from datetime import datetime
 from domain.entities.candidate import Candidate
 from domain.entities.plan import Plan
 from domain.entities.project import Project, ToolchainConfig
+from domain.entities.review import Review, ReviewFinding, Severity
 from domain.entities.run import Run
 from domain.entities.worker import Worker
 from domain.enums import CandidateStatus, FailureKind, ReviewVerdict, RunStatus, WorkerStatus
-from domain.value_objects.identifiers import CandidateId, PlanId, ProjectId, RunId, WorkerId
+from domain.value_objects.identifiers import (
+    CandidateId,
+    PlanId,
+    ProjectId,
+    ReviewId,
+    RunId,
+    WorkerId,
+)
 
 __all__ = [
     "CandidateView",
@@ -231,6 +239,81 @@ class EventView:
     name: str
     occurred_at: datetime
     payload: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidatePatchView:
+    """A candidate's patch, read on demand.
+
+    Separate from CandidateView because a diff is unbounded: a listing that
+    carried every patch would grow with the work rather than with the number of
+    candidates, and a dashboard polls the listing.
+    """
+
+    candidate_id: CandidateId
+    run_id: RunId
+    index: int
+    diff: str
+    changed_files: tuple[str, ...]
+    total_churn: int
+    base_revision: str | None
+
+    @classmethod
+    def of(cls, candidate: Candidate) -> CandidatePatchView:
+        patch = candidate.patch
+        return cls(
+            candidate_id=candidate.id,
+            run_id=candidate.run_id,
+            index=candidate.index,
+            diff=patch.diff if patch is not None else "",
+            changed_files=patch.changed_paths if patch is not None else (),
+            total_churn=patch.total_churn if patch is not None else 0,
+            base_revision=patch.base_revision if patch is not None else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewFindingView:
+    summary: str
+    severity: Severity
+    file: str | None
+    line: int | None
+    repair_instruction: str | None
+
+    @classmethod
+    def of(cls, finding: ReviewFinding) -> ReviewFindingView:
+        return cls(
+            summary=finding.summary,
+            severity=finding.severity,
+            file=finding.file,
+            line=finding.line,
+            repair_instruction=finding.repair_instruction,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewView:
+    id: ReviewId
+    run_id: RunId
+    candidate_id: CandidateId
+    verdict: ReviewVerdict
+    iteration: int
+    summary: str
+    findings: tuple[ReviewFindingView, ...]
+    created_at: datetime
+
+    @classmethod
+    def of(cls, review: Review) -> ReviewView:
+        return cls(
+            id=review.id,
+            run_id=review.run_id,
+            candidate_id=review.candidate_id,
+            verdict=review.verdict,
+            iteration=review.iteration,
+            summary=review.summary,
+            findings=tuple(ReviewFindingView.of(f) for f in review.findings),
+            created_at=review.created_at,
+        )
 
 
 @dataclass(frozen=True, slots=True)

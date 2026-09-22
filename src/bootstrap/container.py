@@ -36,8 +36,10 @@ from application.use_cases.projects import (
 from application.use_cases.runs import (
     CancelRunUseCase,
     CreateRunUseCase,
+    GetCandidatePatchUseCase,
     GetRunUseCase,
     ListCandidatesUseCase,
+    ListReviewsUseCase,
     ListRunEventsUseCase,
     ListRunsUseCase,
 )
@@ -117,6 +119,8 @@ class Container:
     get_run: GetRunUseCase
     list_runs: ListRunsUseCase
     list_candidates: ListCandidatesUseCase
+    candidate_patch: GetCandidatePatchUseCase
+    list_reviews: ListReviewsUseCase
     list_run_events: ListRunEventsUseCase
     register_worker: RegisterWorkerUseCase
     heartbeat: HeartbeatUseCase
@@ -298,6 +302,8 @@ async def build_container(
         get_run=GetRunUseCase(uow_factory=uow_factory),
         list_runs=ListRunsUseCase(uow_factory=uow_factory),
         list_candidates=ListCandidatesUseCase(uow_factory=uow_factory),
+        candidate_patch=GetCandidatePatchUseCase(uow_factory=uow_factory),
+        list_reviews=ListReviewsUseCase(uow_factory=uow_factory),
         list_run_events=ListRunEventsUseCase(uow_factory=uow_factory),
         register_worker=RegisterWorkerUseCase(
             registry=registry,

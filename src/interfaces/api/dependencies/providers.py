@@ -27,9 +27,12 @@ from application.use_cases.projects import (
 from application.use_cases.runs import (
     CancelRunUseCase,
     CreateRunUseCase,
+    GetCandidatePatchUseCase,
     GetRunUseCase,
     ListCandidatesUseCase,
+    ListReviewsUseCase,
     ListRunEventsUseCase,
+    ListRunsUseCase,
 )
 from application.use_cases.workers import (
     DeregisterWorkerUseCase,
@@ -117,6 +120,18 @@ def get_list_candidates(container: ContainerDep) -> ListCandidatesUseCase:
     return container.list_candidates
 
 
+def get_list_runs(container: ContainerDep) -> ListRunsUseCase:
+    return container.list_runs
+
+
+def get_candidate_patch(container: ContainerDep) -> GetCandidatePatchUseCase:
+    return container.candidate_patch
+
+
+def get_list_reviews(container: ContainerDep) -> ListReviewsUseCase:
+    return container.list_reviews
+
+
 def get_list_run_events(container: ContainerDep) -> ListRunEventsUseCase:
     return container.list_run_events
 
@@ -160,6 +175,9 @@ CreateRunDep = Annotated[CreateRunUseCase, Depends(get_create_run)]
 GetRunDep = Annotated[GetRunUseCase, Depends(get_get_run)]
 CancelRunDep = Annotated[CancelRunUseCase, Depends(get_cancel_run)]
 ListCandidatesDep = Annotated[ListCandidatesUseCase, Depends(get_list_candidates)]
+ListRunsDep = Annotated[ListRunsUseCase, Depends(get_list_runs)]
+CandidatePatchDep = Annotated[GetCandidatePatchUseCase, Depends(get_candidate_patch)]
+ListReviewsDep = Annotated[ListReviewsUseCase, Depends(get_list_reviews)]
 ListRunEventsDep = Annotated[ListRunEventsUseCase, Depends(get_list_run_events)]
 ListWorkersDep = Annotated[ListWorkersUseCase, Depends(get_list_workers)]
 RegisterWorkerDep = Annotated[RegisterWorkerUseCase, Depends(get_register_worker)]

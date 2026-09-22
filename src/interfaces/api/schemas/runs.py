@@ -16,9 +16,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from application.dto.commands import CancelRunCommand, CreateRunCommand
 from application.dto.views import (
+    CandidatePatchView,
     CandidateView,
     EventView,
     PlanView,
+    ReviewFindingView,
+    ReviewView,
     RunDetailView,
     RunView,
 )
@@ -28,12 +31,17 @@ from domain.value_objects.identifiers import IdempotencyKey, ProjectId, RunId
 __all__ = [
     "CancelRunRequest",
     "CandidateListResponse",
+    "CandidatePatchResponse",
     "CandidateResponse",
     "CreateRunRequest",
     "PlanResponse",
     "PlanTaskResponse",
+    "ReviewFindingResponse",
+    "ReviewListResponse",
+    "ReviewResponse",
     "RunDetailResponse",
     "RunEventResponse",
+    "RunListResponse",
     "RunResponse",
 ]
 
@@ -263,6 +271,92 @@ class RunEventResponse(BaseModel):
             occurred_at=view.occurred_at,
             payload=payload,
         )
+
+
+class RunListResponse(BaseModel):
+    """Runs of one project, newest first."""
+
+    runs: list[RunResponse]
+
+    @classmethod
+    def of(cls, views: Sequence[RunView]) -> RunListResponse:
+        return cls(runs=[RunResponse.of(v) for v in views])
+
+
+class CandidatePatchResponse(BaseModel):
+    """The code a candidate wrote, in full."""
+
+    candidate_id: UUID
+    run_id: UUID
+    index: int
+    diff: str
+    changed_files: list[str]
+    total_churn: int
+    base_revision: str | None
+
+    @classmethod
+    def of(cls, view: CandidatePatchView) -> CandidatePatchResponse:
+        return cls(
+            candidate_id=view.candidate_id.value,
+            run_id=view.run_id.value,
+            index=view.index,
+            diff=view.diff,
+            changed_files=list(view.changed_files),
+            total_churn=view.total_churn,
+            base_revision=view.base_revision,
+        )
+
+
+class ReviewFindingResponse(BaseModel):
+    summary: str
+    severity: str
+    file: str | None
+    line: int | None
+    repair_instruction: str | None
+
+    @classmethod
+    def of(cls, view: ReviewFindingView) -> ReviewFindingResponse:
+        return cls(
+            summary=view.summary,
+            severity=str(view.severity),
+            file=view.file,
+            line=view.line,
+            repair_instruction=view.repair_instruction,
+        )
+
+
+class ReviewResponse(BaseModel):
+    """One reviewer verdict. Append-only: a repair loop adds, never replaces."""
+
+    id: UUID
+    run_id: UUID
+    candidate_id: UUID
+    verdict: str
+    iteration: int
+    summary: str
+    findings: list[ReviewFindingResponse]
+    created_at: datetime
+
+    @classmethod
+    def of(cls, view: ReviewView) -> ReviewResponse:
+        return cls(
+            id=view.id.value,
+            run_id=view.run_id.value,
+            candidate_id=view.candidate_id.value,
+            verdict=str(view.verdict),
+            iteration=view.iteration,
+            summary=view.summary,
+            findings=[ReviewFindingResponse.of(f) for f in view.findings],
+            created_at=view.created_at,
+        )
+
+
+class ReviewListResponse(BaseModel):
+    reviews: list[ReviewResponse]
+
+    @classmethod
+    def of(cls, views: Sequence[ReviewView]) -> ReviewListResponse:
+        return cls(reviews=[ReviewResponse.of(v) for v in views])
 
 
 class CandidateListResponse(BaseModel):

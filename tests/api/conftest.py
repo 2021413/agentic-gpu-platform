@@ -33,9 +33,12 @@ from application.use_cases.projects import (
 from application.use_cases.runs import (
     CancelRunUseCase,
     CreateRunUseCase,
+    GetCandidatePatchUseCase,
     GetRunUseCase,
     ListCandidatesUseCase,
+    ListReviewsUseCase,
     ListRunEventsUseCase,
+    ListRunsUseCase,
 )
 from application.use_cases.workers import (
     DeregisterWorkerUseCase,
@@ -113,6 +116,9 @@ def harness() -> Harness:
         get_run=GetRunUseCase(uow_factory=uow_factory),
         cancel_run=CancelRunUseCase(uow_factory=uow_factory, bus=bus, queue=queue, clock=clock),
         list_candidates=ListCandidatesUseCase(uow_factory=uow_factory),
+        list_runs=ListRunsUseCase(uow_factory=uow_factory),
+        candidate_patch=GetCandidatePatchUseCase(uow_factory=uow_factory),
+        list_reviews=ListReviewsUseCase(uow_factory=uow_factory),
         list_run_events=ListRunEventsUseCase(uow_factory=uow_factory),
         list_workers=ListWorkersUseCase(registry=registry),
         register_worker=RegisterWorkerUseCase(
