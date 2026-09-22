@@ -25,6 +25,7 @@ __all__ = [
     "LLMProviderKind",
     "Settings",
     "WorkerSettings",
+    "get_api_settings",
     "get_settings",
 ]
 
@@ -292,6 +293,12 @@ class ApiSettings(BaseSettings):
     @property
     def allowed_origins(self) -> tuple[str, ...]:
         return tuple(o.strip() for o in self.cors_allow_origins.split(",") if o.strip())
+
+
+@lru_cache(maxsize=1)
+def get_api_settings() -> ApiSettings:
+    """Presentation-only settings, read once like the rest."""
+    return ApiSettings()
 
 
 @lru_cache(maxsize=1)

@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
-from bootstrap.config import Settings, get_settings
+from bootstrap.config import Settings, get_api_settings, get_settings
 from bootstrap.container import Container, build_container, describe
 from bootstrap.logging import configure_logging
 from bootstrap.readiness import PlatformReadinessProbe
@@ -103,7 +103,9 @@ def create_app(settings: Settings | None = None, *, run_background: bool = True)
                     await task
             await container.aclose()
 
-    return create_api(lifespan=lifespan)
+    # The viewer's origin comes from configuration, which had computed
+    # `allowed_origins` for a long time without anything ever reading it.
+    return create_api(lifespan=lifespan, allowed_origins=get_api_settings().allowed_origins)
 
 
 def main() -> None:
