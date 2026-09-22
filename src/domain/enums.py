@@ -32,6 +32,14 @@ class RunStatus(StrEnum):
     VALIDATING = "VALIDATING"
     REVIEWING = "REVIEWING"
     REPAIRING = "REPAIRING"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    """Reviewed and waiting for a human to let it land.
+
+    Only reachable when the deployment asks for it. Integration is a write into
+    someone else's repository, and a run that waits for an approval nobody is
+    watching never finishes — so the gate is opt-in, and this state is not
+    terminal: it must keep appearing in the active list to be approvable at all.
+    """
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLING = "CANCELLING"

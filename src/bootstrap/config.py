@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     model_context_length: int = 262_144
     llm_request_timeout_seconds: float = 600.0
     inference_api_key: SecretStr = SecretStr("")
+    require_approval: bool = False
+    """Hold a reviewed run until a human approves the merge.
+
+    Off by default on purpose: integration writes into someone else's
+    repository, but a run waiting on an approval nobody is watching never
+    finishes. Turning this on is a statement that somebody is watching.
+    """
     """Bearer token the inference engines demand, if they demand one.
 
     vLLM started with VLLM_API_KEY refuses everything without it. The adapter

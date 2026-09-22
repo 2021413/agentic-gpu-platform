@@ -28,6 +28,7 @@ from application.orchestration.orchestrator import OrchestratorConfig, RunOrches
 from application.orchestration.worker_pool import WorkerPool
 from application.ports import UnitOfWorkFactory
 from application.services.locking import InProcessRunCoordinator
+from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
@@ -121,6 +122,7 @@ class Container:
     list_candidates: ListCandidatesUseCase
     candidate_patch: GetCandidatePatchUseCase
     list_reviews: ListReviewsUseCase
+    approve_run: ApproveRunUseCase
     list_run_events: ListRunEventsUseCase
     register_worker: RegisterWorkerUseCase
     heartbeat: HeartbeatUseCase
@@ -244,6 +246,7 @@ async def build_container(
             job_max_attempts=settings.job_max_attempts,
             static_analysis_is_blocking=settings.static_analysis_is_blocking,
             reserved_output_tokens=settings.reserved_output_tokens,
+            require_approval=settings.require_approval,
         ),
     )
     executor = JobExecutor(
@@ -304,6 +307,7 @@ async def build_container(
         list_candidates=ListCandidatesUseCase(uow_factory=uow_factory),
         candidate_patch=GetCandidatePatchUseCase(uow_factory=uow_factory),
         list_reviews=ListReviewsUseCase(uow_factory=uow_factory),
+        approve_run=ApproveRunUseCase(orchestrator=orchestrator),
         list_run_events=ListRunEventsUseCase(uow_factory=uow_factory),
         register_worker=RegisterWorkerUseCase(
             registry=registry,

@@ -19,6 +19,8 @@ from domain.events.run import (
     PlanRequested,
     RepairRequested,
     ReviewRequested,
+    RunApprovalRejected,
+    RunAwaitingApproval,
     RunCancelled,
     RunCompleted,
     RunCreated,
@@ -344,6 +346,25 @@ class Run(Entity):
         self.record(
             RunCompleted(occurred_at=now, run_id=self._id, candidate_id=self._selected_candidate_id)
         )
+
+    def await_approval(self, *, candidate_id: CandidateId, now: datetime) -> None:
+        """Hold a reviewed run until a human lets it land.
+
+        Integration writes into someone else's repository. When the deployment
+        asks for a human in the loop, the run stops here instead of merging the
+        moment the reviewer says PASS.
+        """
+        self._transition(RunStatus.AWAITING_APPROVAL, now)
+        self._selected_candidate_id = candidate_id
+        self.record(
+            RunAwaitingApproval(occurred_at=now, run_id=self._id, candidate_id=candidate_id)
+        )
+
+    def reject_approval(self, *, now: datetime, reason: str) -> None:
+        """Record a human's refusal. What happens next is the caller's decision:
+        another repair round if the budget allows, a failure otherwise."""
+        self.record(RunApprovalRejected(occurred_at=now, run_id=self._id, reason=reason))
+        self._touch(now)
 
     def fail(self, *, now: datetime, kind: FailureKind, reason: str) -> None:
         if self._status.is_terminal:

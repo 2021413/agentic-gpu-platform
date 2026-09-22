@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Header, Query, status
 
 from domain.value_objects.identifiers import CandidateId, ProjectId, RunId
 from interfaces.api.dependencies.providers import (
+    ApproveRunDep,
     CancelRunDep,
     CandidatePatchDep,
     CreateRunDep,
@@ -23,6 +24,7 @@ from interfaces.api.schemas.runs import (
     CandidateListResponse,
     CandidatePatchResponse,
     CreateRunRequest,
+    RejectRunRequest,
     ReviewListResponse,
     RunDetailResponse,
     RunListResponse,
@@ -144,6 +146,38 @@ async def candidate_diff(
     return CandidatePatchResponse.of(
         await use_case.execute(RunId(run_id), CandidateId(candidate_id))
     )
+
+
+@router.post(
+    "/{run_id}/approve",
+    response_model=RunResponse,
+    summary="Approve a reviewed run and let its patch land",
+    description=(
+        "Only a run held at AWAITING_APPROVAL can be approved, which a "
+        "deployment gets by turning REQUIRE_APPROVAL on. This performs the "
+        "merge into the project repository; it is not a read."
+    ),
+    responses={404: {"model": ProblemDetails}, 409: {"model": ProblemDetails}},
+)
+async def approve_run(run_id: UUID, use_case: ApproveRunDep) -> RunResponse:
+    return RunResponse.of(await use_case.approve(RunId(run_id)))
+
+
+@router.post(
+    "/{run_id}/reject",
+    response_model=RunResponse,
+    summary="Refuse the patch and send the reason back to the coder",
+    description=(
+        "A refusal is feedback, not a verdict: the reviewer passed it and you "
+        "did not. The reason becomes the coder's brief for the next round, or "
+        "the run's failure reason when the repair budget is spent."
+    ),
+    responses={404: {"model": ProblemDetails}, 409: {"model": ProblemDetails}},
+)
+async def reject_run(
+    run_id: UUID, payload: Annotated[RejectRunRequest, Body()], use_case: ApproveRunDep
+) -> RunResponse:
+    return RunResponse.of(await use_case.reject(RunId(run_id), reason=payload.reason))
 
 
 @router.get(

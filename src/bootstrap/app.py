@@ -43,6 +43,7 @@ def _dependencies(container: Container) -> ApiDependencies:
         list_runs=container.list_runs,
         candidate_patch=container.candidate_patch,
         list_reviews=container.list_reviews,
+        approve_run=container.approve_run,
         list_run_events=container.list_run_events,
         list_workers=container.list_workers,
         register_worker=container.register_worker,

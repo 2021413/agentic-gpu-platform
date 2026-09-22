@@ -36,6 +36,7 @@ __all__ = [
     "CreateRunRequest",
     "PlanResponse",
     "PlanTaskResponse",
+    "RejectRunRequest",
     "ReviewFindingResponse",
     "ReviewListResponse",
     "ReviewResponse",
@@ -271,6 +272,16 @@ class RunEventResponse(BaseModel):
             occurred_at=view.occurred_at,
             payload=payload,
         )
+
+
+class RejectRunRequest(BaseModel):
+    """Why the patch was refused.
+
+    Required, and not cosmetic: it is what the coder is handed on the next
+    round. An empty reason spends a repair to learn nothing.
+    """
+
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class RunListResponse(BaseModel):

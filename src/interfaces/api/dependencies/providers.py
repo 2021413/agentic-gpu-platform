@@ -19,6 +19,7 @@ from typing import Annotated
 from fastapi import Depends
 from starlette.requests import Request
 
+from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
@@ -132,6 +133,10 @@ def get_list_reviews(container: ContainerDep) -> ListReviewsUseCase:
     return container.list_reviews
 
 
+def get_approve_run(container: ContainerDep) -> ApproveRunUseCase:
+    return container.approve_run
+
+
 def get_list_run_events(container: ContainerDep) -> ListRunEventsUseCase:
     return container.list_run_events
 
@@ -178,6 +183,7 @@ ListCandidatesDep = Annotated[ListCandidatesUseCase, Depends(get_list_candidates
 ListRunsDep = Annotated[ListRunsUseCase, Depends(get_list_runs)]
 CandidatePatchDep = Annotated[GetCandidatePatchUseCase, Depends(get_candidate_patch)]
 ListReviewsDep = Annotated[ListReviewsUseCase, Depends(get_list_reviews)]
+ApproveRunDep = Annotated[ApproveRunUseCase, Depends(get_approve_run)]
 ListRunEventsDep = Annotated[ListRunEventsUseCase, Depends(get_list_run_events)]
 ListWorkersDep = Annotated[ListWorkersUseCase, Depends(get_list_workers)]
 RegisterWorkerDep = Annotated[RegisterWorkerUseCase, Depends(get_register_worker)]

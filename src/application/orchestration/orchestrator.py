@@ -49,6 +49,7 @@ from domain.exceptions import (
     LLMTimeoutError,
     NoCompatibleWorkerError,
     OutputTruncatedError,
+    RunNotModifiableError,
     StructuredOutputError,
     ToolExecutionError,
     WorkspaceError,
@@ -115,6 +116,13 @@ class OrchestratorConfig:
     validation_timeout_seconds: float = 900.0
     static_analysis_is_blocking: bool = False
     integrate_on_success: bool = True
+    require_approval: bool = False
+    """Hold a reviewed run until a human lets it land.
+
+    Off by default, and deliberately so: integration writes into someone else's
+    repository, but a run waiting on an approval nobody is watching is a run
+    that never finishes. Turning this on is a statement that somebody is.
+    """
 
 
 class RunOrchestrator:
@@ -249,6 +257,63 @@ class RunOrchestrator:
                 if jobs and not _has_unfinished(list(jobs)):
                     stalled.append(run.id)
         return await self._advance_each(stalled, what="advance")
+
+    async def approve(self, run_id: RunId) -> Run:
+        """Let the selected patch land. The write nobody could undo automatically."""
+        async with self._coordinator.lock(run_id), self._uow_factory() as uow:
+            run = await self._require_run(uow, run_id)
+            if run.status is not RunStatus.AWAITING_APPROVAL:
+                raise RunNotModifiableError(run_id, run.status)
+            project = await self._require_project(uow, run)
+            candidates = list(await uow.candidates.list_by_run(run_id))
+            winner = next((c for c in candidates if c.id == run.selected_candidate_id), None)
+            if winner is None:
+                raise DomainError("the run has no selected candidate", run_id=str(run_id))
+
+            now = self._clock.now()
+            if self._config.integrate_on_success:
+                await self._integrate(project=project, run=run, candidate=winner)
+            for loser in candidates:
+                if loser.id != winner.id:
+                    loser.reject(now=now, reason="another candidate was approved")
+                    await uow.candidates.update(loser)
+            winner.select(now)
+            await uow.candidates.update(winner)
+            run.complete(now=now, candidate_id=winner.id)
+            await self._workspaces.release_run(run.id)
+            await uow.runs.update(run)
+            uow.collect(run, *candidates)
+            await commit_and_publish(uow, self._bus)
+            return run
+
+    async def reject(self, run_id: RunId, *, reason: str) -> Run:
+        """Refuse the patch and send the reason back to the coder.
+
+        A refusal is feedback, not a verdict: the reviewer passed it and a human
+        did not, and the coder is the one who can act on the difference. When
+        the repair budget is spent the run fails, carrying the human's reason
+        rather than a generic one.
+        """
+        follow_ups: list[Job] = []
+        async with self._coordinator.lock(run_id), self._uow_factory() as uow:
+            run = await self._require_run(uow, run_id)
+            if run.status is not RunStatus.AWAITING_APPROVAL:
+                raise RunNotModifiableError(run_id, run.status)
+            candidates = list(await uow.candidates.list_by_run(run_id))
+            now = self._clock.now()
+            run.reject_approval(now=now, reason=reason)
+
+            target = [c for c in candidates if c.id == run.selected_candidate_id] or candidates
+            follow_ups = await self._repair_or_fail(
+                uow=uow, run=run, candidates=target, reason=f"rejected by a human: {reason}"
+            )
+            await self._persist_jobs(uow, follow_ups)
+            await uow.runs.update(run)
+            uow.collect(run, *candidates)
+            await commit_and_publish(uow, self._bus)
+            approved = run
+        await self._publish_jobs(follow_ups)
+        return approved
 
     async def resume_active_runs(self) -> Sequence[RunId]:
         """Re-schedule work for runs left in flight by an orchestrator restart.
@@ -699,6 +764,12 @@ class RunOrchestrator:
         if passed:
             selection = self._selection.select(passed)
             winner = selection.winner or passed[0]
+            if self._config.require_approval:
+                # Stop before the write. Losing candidates are left alone: the
+                # human may reject this one, and the others are the alternatives.
+                run.select_candidate(candidate_id=winner.id, rationale=selection.rationale, now=now)
+                run.await_approval(candidate_id=winner.id, now=now)
+                return []
             if self._config.integrate_on_success:
                 await self._integrate(project=project, run=run, candidate=winner)
             for loser in candidates:

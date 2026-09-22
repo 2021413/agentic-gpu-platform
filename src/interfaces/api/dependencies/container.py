@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
@@ -66,6 +67,7 @@ class ApiDependencies:
     list_runs: ListRunsUseCase
     candidate_patch: GetCandidatePatchUseCase
     list_reviews: ListReviewsUseCase
+    approve_run: ApproveRunUseCase
     list_run_events: ListRunEventsUseCase
     # workers
     list_workers: ListWorkersUseCase

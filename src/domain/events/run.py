@@ -18,6 +18,8 @@ __all__ = [
     "RepairRequested",
     "ReviewCompleted",
     "ReviewRequested",
+    "RunApprovalRejected",
+    "RunAwaitingApproval",
     "RunCancelled",
     "RunCompleted",
     "RunCreated",
@@ -148,6 +150,26 @@ class RunCompleted(DomainEvent):
 
     run_id: RunId
     candidate_id: CandidateId | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RunAwaitingApproval(DomainEvent):
+    """Reviewed, and waiting for a human to let it land."""
+
+    name: ClassVar[EventName] = "run.awaiting_approval"
+
+    run_id: RunId
+    candidate_id: CandidateId | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RunApprovalRejected(DomainEvent):
+    """A human refused the patch. The reason is what the coder gets to act on."""
+
+    name: ClassVar[EventName] = "run.approval_rejected"
+
+    run_id: RunId
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
