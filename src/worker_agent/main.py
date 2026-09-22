@@ -36,6 +36,7 @@ def build_agent(settings: WorkerSettings) -> tuple[WorkerAgent, ControlPlaneClie
         probe = InferenceProbe(
             base_url=settings.inference_base_url,
             api_key=settings.inference_api_key.get_secret_value(),
+            scale_to_zero=settings.inference_scale_to_zero,
         )
     description = WorkerDescription(
         endpoint=settings.worker_endpoint,

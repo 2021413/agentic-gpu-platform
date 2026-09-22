@@ -7,7 +7,7 @@
  * is that a green dashboard over a broken pipeline is worse than no dashboard.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import {
   api,
   type Candidate,
@@ -110,6 +110,14 @@ export default function App() {
     }
   };
 
+  // The click handler and the keyboard handler must do the same thing, so the
+  // thing they do lives in one place rather than twice in the markup.
+  const selectProject = (id: string) => {
+    setProjectId(id);
+    setRunId(null);
+    setRun(null);
+  };
+
   const startRun = async (objective: string, count: number) => {
     if (!projectId) return;
     await act(async () => {
@@ -135,7 +143,7 @@ export default function App() {
       </header>
 
       {error && (
-        <div className="error" onClick={() => setError(null)}>
+        <div className="error" aria-live="polite" onClick={() => setError(null)}>
           {error}
         </div>
       )}
@@ -151,11 +159,11 @@ export default function App() {
                 <li
                   key={project.id}
                   className={project.id === projectId ? "active" : ""}
-                  onClick={() => {
-                    setProjectId(project.id);
-                    setRunId(null);
-                    setRun(null);
-                  }}
+                  role="button"
+                  tabIndex={0}
+                  aria-current={project.id === projectId ? "true" : undefined}
+                  onClick={() => selectProject(project.id)}
+                  onKeyDown={activates(() => selectProject(project.id))}
                 >
                   <strong>{project.name}</strong>
                   <small>
@@ -165,7 +173,9 @@ export default function App() {
                   </small>
                 </li>
               ))}
-              {projects.length === 0 && <li className="muted">No project yet.</li>}
+              {projects.length === 0 && (
+                <li className="muted">No project yet. Register one, then it is selectable here.</li>
+              )}
             </ul>
           </section>
 
@@ -180,13 +190,19 @@ export default function App() {
                   <li
                     key={r.id}
                     className={r.id === runId ? "active" : ""}
+                    role="button"
+                    tabIndex={0}
+                    aria-current={r.id === runId ? "true" : undefined}
                     onClick={() => setRunId(r.id)}
+                    onKeyDown={activates(() => setRunId(r.id))}
                   >
                     <span className={`pill ${r.status.toLowerCase()}`}>{r.status}</span>
                     <small>{r.objective}</small>
                   </li>
                 ))}
-                {runs.length === 0 && <li className="muted">No run yet.</li>}
+                {runs.length === 0 && (
+                  <li className="muted">No run yet. Type an objective above to start the first.</li>
+                )}
               </ul>
             </section>
           )}
@@ -195,7 +211,7 @@ export default function App() {
         </aside>
 
         <main className="main">
-          {!run && <p className="muted pad">Pick a run, or start one.</p>}
+          {!run && <p className="muted pad">Pick a run on the left, or start one, to watch it here.</p>}
 
           {run && (
             <>
@@ -205,9 +221,25 @@ export default function App() {
                   <h2>{run.objective}</h2>
                 </div>
                 <div className="run-meta">
-                  <span>{tokens.toLocaleString()} tokens</span>
-                  <span>{run.candidate_count} candidate(s)</span>
-                  <span>{run.repair_iterations} repair(s)</span>
+                  {/* The total is the sum of two API fields, so the split stays one
+                      hover away instead of disappearing into the addition. */}
+                  <div className="stat">
+                    <span
+                      className="stat-value"
+                      title={`${run.input_tokens.toLocaleString()} in / ${run.output_tokens.toLocaleString()} out`}
+                    >
+                      {tokens.toLocaleString()}
+                    </span>
+                    <span className="stat-label">tokens</span>
+                  </div>
+                  <div className="stat">
+                    <span className="stat-value">{run.candidate_count}</span>
+                    <span className="stat-label">candidates</span>
+                  </div>
+                  <div className="stat">
+                    <span className="stat-value">{run.repair_iterations}</span>
+                    <span className="stat-label">repairs</span>
+                  </div>
                 </div>
                 {run.failure_reason && <p className="warn">{run.failure_reason}</p>}
 
@@ -241,6 +273,19 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+/**
+ * A row in `.list` is a button wearing an `<li>`, so it has to answer the
+ * keyboard like one. Space's default action is to scroll the panel, which would
+ * move the row out from under the choice being made, so it is suppressed.
+ */
+function activates(onActivate: () => void) {
+  return (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onActivate();
+  };
 }
 
 function NewRun({

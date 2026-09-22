@@ -257,6 +257,17 @@ class WorkerSettings(BaseSettings):
     inference_base_url: str = "http://127.0.0.1:8000"
     inference_api_key: SecretStr = SecretStr("")
 
+    inference_scale_to_zero: bool = False
+    """Whether this agent's engine is a serverless endpoint that may be at zero.
+
+    The same switch the control plane reads, for a different reason. Here it
+    stops the ten-second heartbeat probe from reaching across the network: on a
+    Modal Server every such request starts a container, so probing liveness on
+    a schedule would keep an H100 warm around the clock. Registration still
+    probes once, because reconciling what the engine really serves is worth one
+    cold start and has caught real mismatches.
+    """
+
     llm_provider: LLMProviderKind = LLMProviderKind.OPENAI_COMPATIBLE
     """Which provider backs this worker.
 

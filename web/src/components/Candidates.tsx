@@ -41,7 +41,9 @@ export function Candidates({
         <span className="badge">{candidates.length}</span>
       </header>
 
-      {candidates.length === 0 && <p className="muted">None yet.</p>}
+      {candidates.length === 0 && (
+        <p className="muted">No candidate yet. One appears per coder job, as it reports.</p>
+      )}
 
       {candidates.map((candidate) => {
         const theirs = reviews.filter((r) => r.candidate_id === candidate.id);

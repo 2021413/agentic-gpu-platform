@@ -20,6 +20,7 @@ __all__ = [
     "NotReadyError",
     "ReadinessResult",
     "SmokeResult",
+    "inference_headers",
     "list_models",
     "smoke_test",
     "wait_until_ready",
@@ -87,10 +88,19 @@ class SmokeResult:
         ]
 
 
-def _headers(config: WorkerConfig) -> dict[str, str]:
+def inference_headers(config: WorkerConfig) -> dict[str, str]:
+    """The Authorization header every call to the local engine must carry.
+
+    Public because it is not only this module's concern: the Modal adapter's
+    sleep-mode calls hit the same server, and a second hand-rolled header would
+    be one more place to forget the key. An engine started with VLLM_API_KEY
+    answers 401 to anything without it, and a 401 in the middle of a warmup
+    reads as "sleep mode is broken" rather than "the key was not sent".
+    """
     if config.vllm_api_key:
         return {"authorization": f"Bearer {config.vllm_api_key.reveal()}"}
     return {}
+
 
 
 def list_models(config: WorkerConfig, *, timeout: float = 5.0) -> tuple[str, ...]:
@@ -99,7 +109,7 @@ def list_models(config: WorkerConfig, *, timeout: float = 5.0) -> tuple[str, ...
     Raises on anything other than a well-formed 200: a 503 or an HTML error page
     from something else listening on the port must not read as success.
     """
-    with httpx.Client(timeout=timeout, headers=_headers(config)) as client:
+    with httpx.Client(timeout=timeout, headers=inference_headers(config)) as client:
         response = client.get(f"{config.base_url}/v1/models")
     if response.status_code != httpx.codes.OK:
         raise NotReadyError(f"/v1/models returned HTTP {response.status_code}")
@@ -183,7 +193,7 @@ def smoke_test(
         "temperature": 0.0,
     }
     try:
-        with httpx.Client(timeout=timeout, headers=_headers(config)) as client:
+        with httpx.Client(timeout=timeout, headers=inference_headers(config)) as client:
             response = client.post(f"{config.base_url}/v1/chat/completions", json=body)
     except httpx.HTTPError as exc:
         return SmokeResult(False, detail=f"request failed: {exc}", latency_seconds=now() - started)
@@ -256,7 +266,7 @@ def health(config: WorkerConfig, *, timeout: float = 3.0) -> HealthSummary:
     ready to serve.
     """
     try:
-        with httpx.Client(timeout=timeout, headers=_headers(config)) as client:
+        with httpx.Client(timeout=timeout, headers=inference_headers(config)) as client:
             response = client.get(f"{config.base_url}/health")
         if response.status_code == httpx.codes.OK:
             return HealthSummary(True, "healthy")

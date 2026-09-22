@@ -27,6 +27,7 @@ import httpx
 from worker.config import PersistentLayout, WorkerConfig
 from worker.gpu import survey_gpus
 from worker.model_state import ModelPreparationError, prepare_model, read_marker
+from worker.readiness import inference_headers
 
 __all__ = [
     "LOCAL_SCRATCH",
@@ -238,7 +239,10 @@ def warmup_vllm(
     }
     for index in range(rounds):
         response = httpx.post(
-            f"{config.base_url}/v1/chat/completions", json=payload, timeout=timeout
+            f"{config.base_url}/v1/chat/completions",
+            json=payload,
+            headers=inference_headers(config),
+            timeout=timeout,
         )
         response.raise_for_status()
         log(f"warmup {index + 1}/{rounds} ok")
@@ -255,7 +259,11 @@ def sleep_vllm(config: WorkerConfig, *, level: int = 1, timeout: float = 300.0) 
     vLLM answers 404.
     """
     try:
-        response = httpx.post(f"{config.base_url}/sleep?level={level}", timeout=timeout)
+        response = httpx.post(
+            f"{config.base_url}/sleep?level={level}",
+            headers=inference_headers(config),
+            timeout=timeout,
+        )
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise SleepModeError(
@@ -268,7 +276,11 @@ def sleep_vllm(config: WorkerConfig, *, level: int = 1, timeout: float = 300.0) 
 def wake_vllm(config: WorkerConfig, *, timeout: float = 300.0) -> None:
     """Bring the weights back to the GPU after a snapshot restore."""
     try:
-        response = httpx.post(f"{config.base_url}/wake_up", timeout=timeout)
+        response = httpx.post(
+            f"{config.base_url}/wake_up",
+            headers=inference_headers(config),
+            timeout=timeout,
+        )
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise SleepModeError(f"vLLM would not wake up: {exc}") from exc

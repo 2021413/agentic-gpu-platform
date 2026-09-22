@@ -69,3 +69,59 @@ def test_every_provider_kind_assembles(provider: LLMProviderKind) -> None:
     agent, client, probe = build_agent(settings(provider))
 
     assert agent is not None and client is not None and probe is not None
+
+
+# -- serverless engines ----------------------------------------------------
+#
+# A Modal Server has no container when it is idle, and its proxy starts one in
+# response to the request that finds the pool empty. That makes a liveness probe
+# an *expensive* operation: the heartbeat runs every ten seconds, so probing a
+# scale-to-zero endpoint on that schedule either keeps an H100 alive around the
+# clock or pays a cold start six times a minute. Both defeat the reason for
+# moving to it.
+
+
+def serverless_settings() -> WorkerSettings:
+    return WorkerSettings(
+        control_plane_url="http://api:8000",
+        worker_endpoint="https://workspace--worker.modal.direct",
+        # Unreachable on purpose: any request at all is the bug under test.
+        inference_base_url="http://127.0.0.1:1",
+        llm_provider=LLMProviderKind.OPENAI_COMPATIBLE,
+        inference_scale_to_zero=True,
+        model_id="Qwen/Qwen3-Coder-30B-A3B-Instruct",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+
+def test_a_serverless_worker_does_not_wake_a_gpu_to_say_it_is_alive() -> None:
+    """`is_healthy` runs on every heartbeat. Against Modal each call would boot
+    a container, so the answer has to come without touching the network."""
+    _, _, probe = build_agent(serverless_settings())
+
+    async def quickly() -> bool:
+        # Two hundredths of a second against an unroutable address: a probe
+        # that opened a socket could not answer inside this budget.
+        async with asyncio.timeout(0.02):
+            return await probe.is_healthy()
+
+    assert asyncio.run(quickly()) is True
+
+
+def test_a_dedicated_worker_still_asks_its_engine() -> None:
+    """The exemption must be exactly as wide as the reason for it: an engine
+    that died on a dedicated pod must still stop receiving work."""
+    _, _, probe = build_agent(settings(LLMProviderKind.OPENAI_COMPATIBLE))
+
+    assert asyncio.run(probe.is_healthy()) is False
+
+
+def test_a_serverless_worker_still_probes_once_before_registering() -> None:
+    """Registration is the only chance to ask the engine what it really serves,
+    and that reconciliation has already caught a wrong context length and a
+    wrong model name. One cold start at startup buys it; one per heartbeat does
+    not, which is the whole distinction."""
+    _, _, probe = build_agent(serverless_settings())
+
+    # Unroutable, so a real probe fails — which is the point: it was attempted.
+    assert asyncio.run(probe.wait_until_ready(timeout_seconds=0.05)) is False
