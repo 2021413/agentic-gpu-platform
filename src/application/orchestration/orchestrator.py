@@ -479,9 +479,9 @@ class RunOrchestrator:
             # front of it rather than searched for. Whether a term from the
             # objective happens to match the file it wrote is luck, and a coder
             # asked to fix code it cannot see rewrites it from scratch.
-            paths=candidate.patch.changed_paths if candidate.patch else (),
+            paths=_files_to_put_in_front_of_the_coder(candidate, plan),
         )
-        repair_brief = reviews[-1].repair_brief() if reviews else None
+        repair_brief = accumulated_repair_brief(reviews)
 
         requirements = JobRequirements(
             role=AgentRole.CODER,
@@ -1168,6 +1168,64 @@ _FAILURE_KINDS: Final[tuple[tuple[type[Exception], FailureKind], ...]] = (
     (ToolExecutionError, FailureKind.TOOL),
     (WorkspaceError, FailureKind.INFRASTRUCTURE),
 )
+
+
+def _files_to_put_in_front_of_the_coder(
+    candidate: Candidate, plan: Plan | None, *, limit: int = 12
+) -> tuple[str, ...]:
+    """Files this coder should not have to go looking for.
+
+    Its own changes first, because a repair it cannot see turns into a rewrite.
+    Then whatever the planner named: each task carries ``target_paths``, which
+    is the planner saying plainly where the work belongs, and nothing read
+    them — the first attempt searched for words from the objective and found
+    the right file only when one happened to match.
+
+    Bounded, because these are added on top of the search rather than instead
+    of it, and the token budget is shared.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for path in candidate.patch.changed_paths if candidate.patch else ():
+        if path not in seen:
+            seen.add(path)
+            ordered.append(path)
+    for task in plan.tasks if plan is not None else ():
+        for path in task.target_paths:
+            if path not in seen:
+                seen.add(path)
+                ordered.append(path)
+    return tuple(ordered[:limit])
+
+
+def accumulated_repair_brief(reviews: Sequence[Review]) -> str | None:
+    """Every objection still on the table, with how often it was raised.
+
+    The coder used to receive only the newest review while the reviewer
+    received the whole history. A real run had the same objection raised in
+    four consecutive rounds, worded identically each time, with nothing to
+    tell the coder it was the fourth — so it kept changing other things.
+
+    ``None`` when no review exists, which is a different thing from an empty
+    brief and is what the prompt distinguishes.
+    """
+    if not reviews:
+        return None
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for review in reviews:
+        for line in review.repair_brief().splitlines():
+            if not line.strip():
+                continue
+            if line not in counts:
+                order.append(line)
+            counts[line] = counts.get(line, 0) + 1
+    if not order:
+        return None
+    return "\n".join(
+        line if counts[line] == 1 else f"{line}  [raised {counts[line]} times; still not fixed]"
+        for line in order
+    )
 
 
 def _recent_tool_evidence(results: Sequence[ToolResult], *, limit: int = 3) -> str:

@@ -510,8 +510,18 @@ _DEFAULT_ANSWERS: dict[AgentRole, str] = {
         {
             "objective": "implement the objective",
             "tasks": [
-                {"key": "impl", "title": "Implement", "depends_on": []},
-                {"key": "test", "title": "Add tests", "depends_on": ["impl"]},
+                {
+                    "key": "impl",
+                    "title": "Implement",
+                    "depends_on": [],
+                    "target_paths": ["parser.py"],
+                },
+                {
+                    "key": "test",
+                    "title": "Add tests",
+                    "depends_on": ["impl"],
+                    "target_paths": ["tests/test_parser.py"],
+                },
             ],
             "assumptions": ["the build command is configured"],
             "constraints": [],
@@ -603,6 +613,10 @@ class FakeOutputCodec:
                     title=str(t["title"]),
                     description=str(t.get("description", "")),
                     depends_on=tuple(t.get("depends_on", ())),
+                    # Read because the real codec reads it and the orchestrator
+                    # uses it: a double that drops a field makes the wiring
+                    # that depends on it impossible to test.
+                    target_paths=tuple(t.get("target_paths", ())),
                 )
                 for t in payload.get("tasks", [])
             ),

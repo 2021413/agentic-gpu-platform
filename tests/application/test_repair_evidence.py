@@ -17,13 +17,17 @@ The coder, which is the only thing that can fix it, received none.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from tests.application.conftest import Platform
 from tests.application.test_workflow import create_run
 
-from domain.enums import RunStatus
+from application.orchestration.orchestrator import accumulated_repair_brief
+from domain.entities.review import Review, ReviewFinding, Severity
+from domain.enums import ReviewVerdict, RunStatus
+from domain.value_objects.identifiers import CandidateId, ReviewId, RunId
 
 
 class _Recorder:
@@ -135,3 +139,60 @@ async def test_the_run_still_ends_when_the_evidence_does_not_help(
     await platform.drain()
 
     assert platform.store.runs.items[view.id].status is RunStatus.FAILED
+
+
+@pytest.mark.tool_exit_codes({"run_tests": 1})
+async def test_the_planner_s_target_files_reach_the_coder(
+    platform: Platform, project: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The planner names the files the work is in. Nothing read them.
+
+    Each task carries `target_paths`, which is the planner stating plainly
+    where the change belongs — and the context provider, which takes explicit
+    paths, was never given them. The first coder attempt searched for terms
+    from the objective instead, and found the right file only when a word
+    happened to match.
+    """
+    await platform.add_worker()
+    recorder = _RequestRecorder(platform.orchestrator._context)
+    monkeypatch.setattr(platform.orchestrator, "_context", recorder)
+    view = await create_run(platform, project, candidate_count=1)
+
+    await platform.orchestrator.start(view.id)
+    await platform.drain()
+
+    # Request 0 is the planner's, which has nothing to point at yet. Request 1
+    # is the first coder attempt: it has produced no patch of its own, so any
+    # path it carries can only have come from the plan.
+    assert len(recorder.requests) >= 2, recorder.requests
+    first_coder_request = recorder.requests[1]
+    assert first_coder_request.paths, (
+        "the first coder attempt was given no file to look at, although the planner had named some"
+    )
+
+
+async def test_a_finding_raised_again_is_marked_as_such(platform: Platform, project: Any) -> None:
+    """A coder that keeps missing the same point should be told it is missing it.
+
+    A real run showed the reviewer raising the same objection in four
+    consecutive rounds while the coder changed other things. The brief said
+    the same words each time and nothing said "again".
+    """
+    run_id, candidate_id = RunId.generate(), CandidateId.generate()
+    finding = ReviewFinding(summary="the retry never closes the socket", severity=Severity.MAJOR)
+
+    def review(iteration: int) -> Review:
+        return Review(
+            id=ReviewId.generate(),
+            run_id=run_id,
+            candidate_id=candidate_id,
+            verdict=ReviewVerdict.FAIL,
+            iteration=iteration,
+            created_at=datetime(2026, 1, iteration, tzinfo=UTC),
+            findings=(finding,),
+        )
+
+    brief = accumulated_repair_brief([review(1), review(2), review(3)])
+
+    assert "the retry never closes the socket" in brief
+    assert "3" in brief, f"nothing says how many times it was raised: {brief}"
