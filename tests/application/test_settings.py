@@ -55,3 +55,14 @@ def test_worker_roles_are_parsed_and_typos_are_fatal() -> None:
 
 def test_the_service_token_is_not_printed_by_accident() -> None:
     assert "super-secret" not in repr(settings(service_token="super-secret"))
+
+
+# -- the prompt is more than the code excerpt ------------------------------
+def test_the_prompt_overhead_allowance_reaches_the_orchestrator() -> None:
+    """The fleet reports room for a whole prompt; the excerpt is only part of
+    it. Counting only the excerpt made the first real run fail by exactly one
+    token — 28672 packed into a 32768 window with 4096 reserved for the answer,
+    and the template pushed it to 28673."""
+    settings = Settings(prompt_overhead_tokens=3_000, _env_file=None)  # type: ignore[call-arg]
+
+    assert settings.prompt_overhead_tokens == 3_000

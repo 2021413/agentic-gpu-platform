@@ -96,3 +96,51 @@ async def test_the_budget_is_never_negative(reserve: int) -> None:
         JobRequirements(role=AgentRole.CODER, reserved_output_tokens=reserve)
     )
     assert budget is not None and budget >= 0
+
+
+# -- the excerpt is not the whole prompt -----------------------------------
+#
+# `prompt_budget` answers "how large a prompt can the fleet take". That number
+# was handed to the context provider as the budget for the code excerpt, which
+# assumed the excerpt was the entire prompt. It is not: the instructions, the
+# objective, the plan, the accumulated review findings and the JSON schema ride
+# in the same window and none of them were counted.
+#
+# The first real run against a 32768-token engine failed by exactly one token:
+#
+#     maximum context length is 32768 tokens. However, you requested 4096
+#     output tokens and your prompt contains at least 28673 input tokens
+#
+# 28672 is 32768 - 4096 to the token. The excerpt had filled the whole prompt
+# budget and the template pushed it over — after the GPU had been woken.
+
+from application.orchestration.orchestrator import OrchestratorConfig  # noqa: E402
+
+ROOMY = OrchestratorConfig(context_max_tokens=1_000_000, prompt_overhead_tokens=2_048)
+
+
+def test_the_excerpt_never_fills_the_whole_prompt_budget() -> None:
+    fleet = 32_768 - RESERVE  # the window that produced the failure above
+
+    assert ROOMY.excerpt_budget(fleet) < fleet
+
+
+def test_what_it_leaves_is_exactly_the_allowance() -> None:
+    assert ROOMY.excerpt_budget(28_672) == 28_672 - 2_048
+
+
+def test_a_fleet_too_narrow_for_the_prompt_itself_gets_no_excerpt() -> None:
+    """Zero, not a negative budget the provider would treat as unbounded."""
+    assert OrchestratorConfig(prompt_overhead_tokens=2_048).excerpt_budget(100) == 0
+
+
+def test_an_empty_fleet_leaves_the_configured_ceiling_alone() -> None:
+    """There is nothing to learn from, and guessing is what caused the
+    24000-against-16384 mismatch this whole mechanism exists to prevent."""
+    assert ROOMY.excerpt_budget(None) == 1_000_000
+
+
+def test_the_fleet_only_ever_lowers_the_ceiling() -> None:
+    tight = OrchestratorConfig(context_max_tokens=8_000, prompt_overhead_tokens=2_048)
+
+    assert tight.excerpt_budget(1_000_000) == 8_000

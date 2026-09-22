@@ -248,6 +248,7 @@ async def build_container(
             job_max_attempts=settings.job_max_attempts,
             static_analysis_is_blocking=settings.static_analysis_is_blocking,
             reserved_output_tokens=settings.reserved_output_tokens,
+            prompt_overhead_tokens=settings.prompt_overhead_tokens,
             require_approval=settings.require_approval,
         ),
     )

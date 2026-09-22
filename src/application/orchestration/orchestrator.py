@@ -110,6 +110,28 @@ class OrchestratorConfig:
     context_max_files: int = 40
     context_max_tokens: int = 24_000
     """Ceiling on the repository view. The fleet lowers it; nothing raises it."""
+    prompt_overhead_tokens: int = 2_048
+    """Room kept in the window for the prompt that is not the repository view.
+
+    The fleet reports how large a *prompt* it can take. That number was handed
+    straight to the context provider as the budget for the code excerpt, which
+    silently assumed the excerpt was the whole prompt. It is not: the system
+    instructions, the objective, the plan, the accumulated review findings and
+    the JSON schema all ride in the same window and none of them were counted.
+
+    The first real run against a 32768-token engine failed by exactly one token:
+
+        maximum context length is 32768 tokens. However, you requested 4096
+        output tokens and your prompt contains at least 28673 input tokens
+
+    28672 is 32768 - 4096 to the token. The excerpt had been packed to fill the
+    entire prompt budget, and the template pushed it over. Off by one, but the
+    cost is a whole cold GPU and a run that reaches the coder and dies.
+
+    A fixed allowance rather than a measurement, because the request is sized
+    before the prompt is rendered. It is deliberately generous: over-reserving
+    costs a few files of context, under-reserving costs the run.
+    """
     reserved_output_tokens: int = 4_096
     """Room kept in the window for the answer.
 
@@ -118,6 +140,19 @@ class OrchestratorConfig:
     not. Too small and the reply is truncated mid-JSON, which reaches the
     repair loop as malformed JSON rather than as "you ran out of room".
     """
+    def excerpt_budget(self, fleet_budget: int | None) -> int:
+        """How many tokens of repository the prompt may carry.
+
+        `fleet_budget` is room for the WHOLE prompt, so the part of the prompt
+        that is not code has to come out of it first. The fleet only ever
+        lowers the configured ceiling: an empty fleet leaves it alone, because
+        there is nothing to learn from and guessing is what caused the
+        24000-against-16384 mismatch in the first place.
+        """
+        if fleet_budget is None:
+            return self.context_max_tokens
+        return min(self.context_max_tokens, max(0, fleet_budget - self.prompt_overhead_tokens))
+
     validation_timeout_seconds: float = 900.0
     static_analysis_is_blocking: bool = False
     integrate_on_success: bool = True
@@ -1075,14 +1110,13 @@ class RunOrchestrator:
         budget = await self._pool.prompt_budget(
             JobRequirements(role=role, reserved_output_tokens=self._config.reserved_output_tokens)
         )
-        max_tokens = self._config.context_max_tokens
-        if budget is not None and budget < max_tokens:
+        max_tokens = self._config.excerpt_budget(budget)
+        if max_tokens != self._config.context_max_tokens:
             _log.debug(
                 "context budget lowered from %d to %d by the fleet's context window",
+                self._config.context_max_tokens,
                 max_tokens,
-                budget,
             )
-            max_tokens = budget
         return ContextRequest(
             objective=objective,
             paths=tuple(paths),

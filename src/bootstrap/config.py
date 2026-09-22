@@ -165,6 +165,14 @@ class Settings(BaseSettings):
     numbers that had to agree is exactly how the 262144/16384 mismatch
     happened.
     """
+    prompt_overhead_tokens: int = 2_048
+    """Room kept in the window for the prompt that is not the code excerpt.
+
+    The fleet reports how large a prompt it can take; the repository view is
+    only part of that prompt. Instructions, objective, plan, accumulated review
+    findings and the JSON schema ride in the same window. Counting only the
+    excerpt is what made the first real run fail by exactly one token.
+    """
     job_max_attempts: int = 3
     reaper_interval_seconds: float = 10.0
     executor_concurrency: int = 8
