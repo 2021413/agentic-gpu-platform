@@ -9,18 +9,26 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
+import respx
 
 from infra.modal.runtime import (
     ColdModelError,
+    SleepModeError,
     append_startup_record,
     compile_cache_environment,
     new_record,
     resolve_model,
     scratch_environment,
+    sleep_vllm,
     startup_records,
+    wake_vllm,
+    warmup_vllm,
 )
+from tests.conftest import Recorder
 from worker.config import PersistentLayout, WorkerConfig
 from worker.model_state import ModelState, write_marker
 
@@ -170,3 +178,181 @@ def test_the_caches_that_must_stay_on_the_volume_still_do(
     on_volume = {"HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TORCH_HOME"}
     for name in on_volume:
         assert environment[name].startswith(str(layout.root)), name
+
+
+# -- warmup, sleep and wake: what makes a memory snapshot worth taking -----
+#
+# These three run against a simulated vLLM, the same way `test_readiness.py`
+# does, because every one of their failure modes is an HTTP answer: a route
+# that does not exist, a half-warmed engine, a server that went away.
+
+BASE_URL = "http://127.0.0.1:8000"
+
+WARMUP_OK = {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "acme/tiny-model",
+    "choices": [
+        {"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}
+    ],
+}
+
+
+@pytest.fixture
+def router() -> Any:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        yield mock
+
+
+def test_warmup_asks_for_the_name_vllm_actually_serves(
+    make_config: Callable[..., WorkerConfig], router: Any, recorder: Recorder
+) -> None:
+    """With `--served-model-name` set, vLLM 404s any request naming the raw
+    model id. A warmup that sent the id would fail every round and abort the
+    deploy — or, worse, be made to pass by ignoring its own errors."""
+    config = make_config(model_id="acme/tiny-model", served_model_name="acme-public")
+    route = router.post("/v1/chat/completions").respond(200, json=WARMUP_OK)
+
+    warmup_vllm(config, rounds=1, log=recorder)
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["model"] == "acme-public"
+    assert body["messages"][0]["role"] == "user"
+
+
+def test_warmup_serves_every_round_it_was_asked_for(
+    config: WorkerConfig, router: Any, recorder: Recorder
+) -> None:
+    """The rounds are the whole point: CUDA graphs are built lazily on the
+    first inferences, so a warmup that quietly does fewer than it was told
+    leaves that work outside the snapshot and in every restore instead."""
+    route = router.post("/v1/chat/completions").respond(200, json=WARMUP_OK)
+
+    warmup_vllm(config, rounds=5, log=recorder)
+
+    assert route.call_count == 5
+    assert recorder.lines[-1] == "warmup 5/5 ok"
+
+
+def test_warmup_does_three_rounds_unless_told_otherwise(
+    config: WorkerConfig, router: Any, recorder: Recorder
+) -> None:
+    """`app.py` calls this with no `rounds`; the default is what ships."""
+    route = router.post("/v1/chat/completions").respond(200, json=WARMUP_OK)
+
+    warmup_vllm(config, log=recorder)
+
+    assert route.call_count == 3
+
+
+def test_a_rejected_warmup_round_stops_before_the_snapshot(
+    config: WorkerConfig, router: Any, recorder: Recorder
+) -> None:
+    """Snapshotting a half-warmed engine is the expensive mistake: every later
+    container restores from it, so one 500 here would be paid back on every
+    cold start until someone reran the deploy."""
+    router.post("/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json=WARMUP_OK),
+            httpx.Response(500, text="engine core died"),
+            httpx.Response(200, json=WARMUP_OK),
+        ]
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        warmup_vllm(config, rounds=3, log=recorder)
+
+    assert recorder.lines == ["warmup 1/3 ok"], "the third round must never be sent"
+
+
+def test_sleep_hits_the_sleep_route_at_level_one_by_default(
+    config: WorkerConfig, router: Any
+) -> None:
+    """Level 1 keeps the weights in host RAM. A snapshot taken at any other
+    level captures device memory the restoring container may not reproduce."""
+    route = router.post("/sleep").respond(200, json={"message": "ok"})
+
+    sleep_vllm(config)
+
+    assert str(route.calls.last.request.url) == f"{BASE_URL}/sleep?level=1"
+
+
+def test_sleep_forwards_the_level_it_was_given(config: WorkerConfig, router: Any) -> None:
+    """A level silently pinned to 1 would drop the caller's level-2 request on
+    the floor and snapshot far more memory than asked for."""
+    route = router.post("/sleep").respond(200, json={"message": "ok"})
+
+    sleep_vllm(config, level=2)
+
+    assert str(route.calls.last.request.url) == f"{BASE_URL}/sleep?level=2"
+
+
+def test_a_404_from_sleep_names_the_two_settings_that_bring_the_route_back(
+    config: WorkerConfig, router: Any
+) -> None:
+    """404 is the exact shape of a forgotten VLLM_SERVER_DEV_MODE: the route
+    does not exist rather than failing. Nothing in that status says why, so
+    the error has to name both settings or the next person reads vLLM source."""
+    router.post("/sleep").respond(404, json={"detail": "Not Found"})
+
+    with pytest.raises(SleepModeError) as caught:
+        sleep_vllm(config)
+
+    message = str(caught.value)
+    assert "VLLM_SERVER_DEV_MODE=1" in message
+    assert "--enable-sleep-mode" in message
+    assert "404" in message, "the status is what tells you which of the two is missing"
+
+
+def test_wake_hits_the_wake_up_route(config: WorkerConfig, router: Any) -> None:
+    """A restored container serves nothing until the weights are back on the
+    GPU, so the route name is load-bearing: a typo is a worker that 404s once
+    and then answers every request from an asleep engine."""
+    route = router.post("/wake_up").respond(200, json={"message": "ok"})
+
+    wake_vllm(config)
+
+    assert str(route.calls.last.request.url) == f"{BASE_URL}/wake_up"
+
+
+@pytest.mark.parametrize("status", [404, 500, 503])
+def test_a_wake_that_fails_is_raised_not_logged(
+    config: WorkerConfig, router: Any, status: int
+) -> None:
+    """Restoring a snapshot and failing to wake leaves a container that looks
+    healthy and answers nothing. It has to fail loudly, at `@modal.enter()`,
+    where Modal kills it in seconds instead of routing traffic to it."""
+    router.post("/wake_up").respond(status, text="no")
+
+    with pytest.raises(SleepModeError) as caught:
+        wake_vllm(config)
+
+    assert "would not wake up" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("call", "expected"),
+    [
+        (sleep_vllm, "would not sleep"),
+        (wake_vllm, "would not wake up"),
+    ],
+)
+def test_a_dead_server_is_a_sleep_mode_error_not_a_raw_httpx_error(
+    config: WorkerConfig,
+    router: Any,
+    call: Callable[[WorkerConfig], None],
+    expected: str,
+) -> None:
+    """An engine that crashed during sleep answers with a closed socket, not a
+    status, so `raise_for_status` never runs. `app.py` catches SleepModeError;
+    an httpx exception escaping past it would skip the diagnosis entirely and
+    surface as a bare traceback in Modal's log."""
+    router.post("/sleep").mock(side_effect=httpx.ConnectError("connection refused"))
+    router.post("/wake_up").mock(side_effect=httpx.ReadTimeout("timed out"))
+
+    with pytest.raises(SleepModeError) as caught:
+        call(config)
+
+    assert expected in str(caught.value)
+    assert isinstance(caught.value.__cause__, httpx.HTTPError)

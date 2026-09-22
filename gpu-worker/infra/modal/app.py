@@ -46,6 +46,9 @@ from infra.modal.runtime import (
     new_record,
     resolve_model,
     scratch_environment,
+    sleep_vllm,
+    wake_vllm,
+    warmup_vllm,
 )
 from infra.modal.secrets import worker_secrets
 from infra.modal.volumes import model_cache_volume, volume_mounts
@@ -75,6 +78,10 @@ app = modal.App(
     volumes=volume_mounts(),
     secrets=worker_secrets(),
     port=8000,
+    # Without this the container re-reads `active_config()` from an environment
+    # that has none of the deployer's flags, and quietly runs a different
+    # configuration from the one that was deployed.
+    env=CONFIG.container_environment(),
     **CONFIG.as_server_kwargs(),
 )
 class VLLMServer:
@@ -86,6 +93,7 @@ class VLLMServer:
     """
 
     _process: subprocess.Popen[bytes] | None = None
+    _config: WorkerConfig | None = None
 
     @modal.enter()
     def start(self) -> None:
@@ -129,6 +137,13 @@ class VLLMServer:
             # sockets back on a filesystem that cannot hold them.
             child_environment = {**compile_environment, **scratch_environment()}
 
+            # `--enable-sleep-mode` is a deploy-time decision, so it is added
+            # here rather than baked into the image's VLLM_EXTRA_ARGS.
+            if CONFIG.vllm_snapshot_args:
+                config = replace(
+                    config, extra_args=(*config.extra_args, *CONFIG.vllm_snapshot_args)
+                )
+
             mark = time.monotonic()
             self._process = launch_vllm(
                 config, snapshot, extra_environment=child_environment
@@ -152,6 +167,17 @@ class VLLMServer:
             if not result.ready:
                 raise RuntimeError(f"vLLM never became ready: {result.render()}")
             print(result.render())
+
+            if CONFIG.enable_memory_snapshot:
+                # Everything from here is what the snapshot will contain. The
+                # warmup is the load-bearing part: CUDA graphs are built on the
+                # first inference, not at load, so a snapshot taken before it
+                # restores a container that still has to build them.
+                mark = time.monotonic()
+                warmup_vllm(config)
+                sleep_vllm(config)
+                print(f"warmed and asleep in {monotonic_ms(mark)}ms; snapshotting")
+                self._config = config
         except BaseException as exc:
             record = replace(
                 record,
@@ -167,6 +193,24 @@ class VLLMServer:
                 print(str(exc))
             raise
         self._write_record(layout, record)
+
+    @modal.enter(snap=False)
+    def resume(self) -> None:
+        """Bring the weights back to the GPU after a snapshot restore.
+
+        Runs after `start` on a fresh container and alone on a restored one.
+        Without snapshots enabled it is a no-op, so the two paths stay one code
+        path rather than two that drift.
+        """
+        if not CONFIG.enable_memory_snapshot:
+            return
+        began = time.monotonic()
+        config = self._config or WorkerConfig.from_env()
+        wake_vllm(config)
+        result = wait_until_ready(config, timeout_seconds=300.0, log=print)
+        if not result.ready:
+            raise RuntimeError(f"vLLM did not wake: {result.render()}")
+        print(f"restored and serving in {monotonic_ms(began)}ms")
 
     @modal.exit()
     def stop(self) -> None:

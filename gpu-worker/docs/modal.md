@@ -128,7 +128,7 @@ Defined in `infra/modal/config.py`, selected by `MODAL_PROFILE`:
 |---|---|---|
 | `min_containers` | 0 | 0 |
 | `max_containers` | 1 | 4 |
-| `scaledown_window` | 60 s | 120 s |
+| `scaledown_window` | 130 s | 130 s |
 | `startup_timeout` | 900 s | 900 s |
 | `exit_grace_period` | 120 s | 300 s |
 | `unauthenticated` | allowed | **refused** |
@@ -178,11 +178,15 @@ Three things move it, in this order:
    which splits the boot into volume reload, model resolution, vLLM launch and
    readiness — because "the cold start is slow" has at least three different
    fixes and one number tells you none of them.
-2. **Idle GPU you did not want.** `scripts/benchmark_scaledown.py` replays one
-   request pattern at several `scaledown_window` values and reports total
-   GPU-seconds for each. Both sides of the trade are the same dollars, so the
-   choice is arithmetic rather than taste — but only once the pattern is your
-   real one.
+2. **Idle GPU you did not want.** Once the cold start is measured this stops
+   being a search and becomes arithmetic. Idle GPU and booting GPU bill at the
+   same rate, so the window that minimises GPU-seconds is the one where waiting
+   costs what booting costs — the cold start's own duration, here ~130 s. Below
+   it, a request arriving inside the window is strictly cheaper served warm;
+   above it, you are paying more to avoid a boot than the boot costs. That is
+   the ski-rental bound, and it caps the worst case at twice optimal without
+   predicting anything. `scripts/benchmark_scaledown.py` exists to check that
+   reasoning against a real day's traffic, not to discover the number.
 3. **Anything on the critical path that is not inference.** A download, a hub
    lookup, a recompilation. Hence the preload script, `HF_HUB_OFFLINE=1` once
    the snapshot is local, and a compile cache keyed by the GPU actually
@@ -321,6 +325,51 @@ Other measurements worth keeping:
   every one answered 503, produced exactly one container.
 * **Redeploying a code change takes 15 seconds**, against 240 for the first
   deploy that had to pull and build the image.
+
+## Memory snapshots: measured, and turned back off
+
+Modal's GPU memory snapshots promise up to a 10× faster cold start, and the
+code to use them is in this repository behind `MODAL_ENABLE_MEMORY_SNAPSHOT`
+and `MODAL_ENABLE_GPU_SNAPSHOT`. **They are off, because on this Server they
+made cold starts slower.**
+
+The pattern implemented is Modal's own: warm the engine with three real
+completions so the lazily-built CUDA graphs are captured, put vLLM to sleep so
+the weights move to host memory, let Modal snapshot, then wake on restore. All
+of it works — the logs show `fall asleep` in 10.0 s and `wake up` in 1.7 s. What
+does not work is the saving:
+
+```text
+Restoring Function from memory snapshot.
+launching: vllm serve ...              <- a full boot, every time
+Model loading took 28.3 s
+init engine took 32.8 s
+ready after 123 s
+warmup 1/3 ok ... warmup 3/3 ok
+It took 10.0 seconds to fall asleep.
+warmed and asleep in 10430ms; snapshotting
+restored and serving in 1714ms
+```
+
+Every container creates a snapshot and no container is ever spared a boot by
+one. `@modal.enter(snap=True)` captures the Modal runtime's own process; vLLM
+runs in a subprocess, and on `@app.server` that subprocess is not in the
+snapshot. Modal's published example that does benefit uses the older
+`@app.cls` + `@modal.web_server` pair.
+
+Measured cost of enabling them anyway: **+20 s on every cold start** (13 s of
+warmup, 10 s falling asleep, 1.7 s waking) for nothing. Worse, the first boot
+after enabling took 474 s, because `--enable-sleep-mode` changes vLLM's
+configuration hash and therefore invalidated the compiled-artifact cache:
+`init engine took 322.17 s (compilation: 261.46 s)`.
+
+One real effect is worth recording: after the warmup, the first completion came
+back in **1.43 s** instead of ~4 s, because the first request no longer pays for
+the lazily-built graphs. That is a 2.6 s saving bought with 13 s of boot, so it
+does not pay for itself here either.
+
+Revisit if Modal extends snapshot capture to subprocesses, or if this worker
+moves to `@app.cls`.
 
 ## What is still unproven
 

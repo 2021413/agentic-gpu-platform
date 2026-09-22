@@ -174,6 +174,18 @@ class ModalWorkerConfig:
 
     # -- derived --------------------------------------------------------
     @property
+    def vllm_snapshot_args(self) -> tuple[str, ...]:
+        """Flags vLLM needs before a snapshot can be taken of it.
+
+        Empty unless snapshots are on, because `--enable-sleep-mode` is not
+        free: it keeps a host-memory copy of the weights so they can be moved
+        back to the GPU, and a worker that never sleeps pays that for nothing.
+        """
+        if not self.enable_memory_snapshot:
+            return ()
+        return ("--enable-sleep-mode",)
+
+    @property
     def benchmark_gpu(self) -> str:
         """The same GPU request, with Modal's free H200 upgrade refused.
 
@@ -214,6 +226,35 @@ class ModalWorkerConfig:
         if self.enable_gpu_snapshot:
             kwargs["experimental_options"] = {"enable_gpu_snapshot": True}
         return kwargs
+
+    def container_environment(self) -> dict[str, str | None]:
+        """Deploy-time decisions the container has to agree with.
+
+        `CONFIG = active_config()` is evaluated twice: once on the machine
+        running `modal deploy`, to build the decorator, and once again inside
+        every container, when Modal imports the module. The container's
+        environment does not carry the deployer's shell, so a flag passed as
+        `MODAL_ENABLE_MEMORY_SNAPSHOT=1 modal deploy ...` configured the
+        decorator and then read back as `False` in the container.
+
+        That failed silently and expensively: the Server was registered with
+        GPU snapshots enabled, while the code that warms the engine and puts it
+        to sleep — the only thing that makes a snapshot worth taking — never
+        ran. The deployment and the container were running two different
+        configurations and neither said so.
+
+        Shipping the decided values as container environment closes that gap.
+        Only the fields the container actually reads are sent; the autoscaler
+        settings belong to Modal and are already frozen into the decorator.
+        """
+        environment: dict[str, str | None] = {
+            "MODAL_PROFILE": self.profile,
+            "MODAL_ENABLE_MEMORY_SNAPSHOT": "1" if self.enable_memory_snapshot else "0",
+            "MODAL_ENABLE_GPU_SNAPSHOT": "1" if self.enable_gpu_snapshot else "0",
+            "MODAL_ALLOW_COLD_DOWNLOAD": "1" if self.allow_cold_download else "0",
+            "MODAL_STARTUP_TIMEOUT": str(self.startup_timeout),
+        }
+        return environment
 
     def describe(self) -> list[str]:
         """What this deployment will cost and refuse, in one block of text."""
@@ -326,6 +367,21 @@ _OVERRIDES: Final = (
 )
 
 
+# Keeping a container alive costs the same per second as booting one, so the
+# window that minimises GPU-seconds is the one where an idle wait costs exactly
+# what a cold start costs — that is, the cold start's own duration.
+#
+#   measured cold start   ~130 s   ($0.15 at $0.001097/s)
+#   idle at the same rate  130 s   ($0.14)
+#
+# Below that, a request arriving inside the window is strictly cheaper served
+# warm; above it, you are paying more to avoid a boot than the boot costs. This
+# is the classic ski-rental bound, and it caps the worst case at twice optimal
+# without needing to predict the next request. It also means the number is not
+# a preference: it moves when the cold start moves, which is why the cold-start
+# benchmark comes first and this follows from it.
+COLD_START_SECONDS: Final = 130
+
 DEV: Final = ModalWorkerConfig(
     profile="dev",
     gpu="H100",
@@ -333,7 +389,7 @@ DEV: Final = ModalWorkerConfig(
     # One container, hard. A loop in a script that fans out ten requests would
     # otherwise provision ten H100s, and the mistake is only visible on the bill.
     max_containers=1,
-    scaledown_window=60,
+    scaledown_window=COLD_START_SECONDS,
     startup_timeout=900,
     exit_grace_period=120,
 )
@@ -345,7 +401,7 @@ PROD: Final = ModalWorkerConfig(
     # and nothing has yet measured a latency requirement that justifies it.
     min_containers=0,
     max_containers=4,
-    scaledown_window=120,
+    scaledown_window=COLD_START_SECONDS,
     startup_timeout=900,
     exit_grace_period=300,
 )

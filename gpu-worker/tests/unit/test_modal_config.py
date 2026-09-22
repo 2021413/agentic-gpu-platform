@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from infra.modal.config import (
+    COLD_START_SECONDS,
     DEV,
     PROD,
     ModalConfigError,
@@ -123,3 +124,45 @@ def test_describe_states_the_cost_of_a_warm_container() -> None:
     lines = "\n".join(ModalWorkerConfig(profile="prod", min_containers=1).describe())
 
     assert "bills 1 GPU(s) continuously" in lines
+
+
+# -- snapshots -------------------------------------------------------------
+def test_sleep_mode_is_only_requested_when_snapshots_are() -> None:
+    """`--enable-sleep-mode` keeps a host-memory copy of the weights so they can
+    move back to the GPU. A worker that never sleeps pays that for nothing."""
+    assert DEV.vllm_snapshot_args == ()
+    assert ModalWorkerConfig(
+        profile="dev", enable_memory_snapshot=True
+    ).vllm_snapshot_args == ("--enable-sleep-mode",)
+
+
+def test_the_container_is_told_what_was_deployed() -> None:
+    """`CONFIG` is evaluated twice — once to build the decorator, once inside
+    the container — and the container's environment has none of the deployer's
+    flags. Shipping the decided values is what keeps the two from diverging."""
+    deployed = ModalWorkerConfig(
+        profile="prod", enable_memory_snapshot=True, enable_gpu_snapshot=True
+    )
+
+    environment = deployed.container_environment()
+    restored = active_config(environment)
+
+    assert restored.enable_memory_snapshot is True
+    assert restored.enable_gpu_snapshot is True
+    assert restored.profile == "prod"
+
+
+def test_a_container_that_reads_a_stale_environment_disagrees_loudly() -> None:
+    """The failure this guards against: decorator says snapshot, code says no."""
+    deployed = ModalWorkerConfig(profile="dev", enable_memory_snapshot=True)
+
+    assert active_config({}).enable_memory_snapshot is False, "the bug, reproduced"
+    assert active_config(deployed.container_environment()).enable_memory_snapshot is True
+
+
+def test_the_idle_window_is_derived_from_the_cold_start_it_avoids() -> None:
+    """Idle GPU and booting GPU bill at the same rate, so the window that
+    minimises GPU-seconds is the cold start's own duration. It is not a
+    preference: it moves when the measured cold start moves."""
+    assert DEV.scaledown_window == COLD_START_SECONDS
+    assert PROD.scaledown_window == COLD_START_SECONDS

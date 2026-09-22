@@ -84,6 +84,13 @@ def _image_environment() -> dict[str, str]:
         # populated, on a CPU container, but the variable is read at import time
         # so it has to be in the image rather than set by the caller.
         "HF_XET_HIGH_PERFORMANCE": "1",
+        # Exposes vLLM's /sleep and /wake_up routes. Without it they 404 and a
+        # snapshot would capture a server holding 29 GB of device memory that
+        # the restoring container cannot be assumed to reproduce.
+        "VLLM_SERVER_DEV_MODE": "1",
+        # Modal's own vLLM snapshot example sets this for snapshot
+        # compatibility; parallel Inductor workers do not survive the restore.
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
     }
     env.update(cache_environment())
     return env

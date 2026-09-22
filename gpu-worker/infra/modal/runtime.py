@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
+import httpx
+
 from worker.config import PersistentLayout, WorkerConfig
 from worker.gpu import survey_gpus
 from worker.model_state import ModelPreparationError, prepare_model, read_marker
@@ -29,6 +31,7 @@ from worker.model_state import ModelPreparationError, prepare_model, read_marker
 __all__ = [
     "LOCAL_SCRATCH",
     "ColdModelError",
+    "SleepModeError",
     "StartupRecord",
     "append_startup_record",
     "compile_cache_environment",
@@ -36,7 +39,10 @@ __all__ = [
     "launch_vllm",
     "resolve_model",
     "scratch_environment",
+    "sleep_vllm",
     "startup_records",
+    "wake_vllm",
+    "warmup_vllm",
 ]
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -200,6 +206,72 @@ def launch_vllm(
     environment.setdefault("HF_HUB_OFFLINE", "1")
     log("launching: " + " ".join(config.redacted_argv(snapshot)))
     return subprocess.Popen(argv, env=environment)
+
+
+# -- sleep mode, which is what makes a snapshot possible ----------------
+
+
+class SleepModeError(RuntimeError):
+    """vLLM refused to sleep or wake. The snapshot would be worthless."""
+
+
+def warmup_vllm(
+    config: WorkerConfig,
+    *,
+    rounds: int = 3,
+    timeout: float = 300.0,
+    log: Callable[[str], None] = print,
+) -> None:
+    """Serve a few real completions before snapshotting.
+
+    Not a health check. CUDA graphs and some Torch compilation outputs are
+    produced lazily, on the first inference rather than at load, and a snapshot
+    taken before them captures a container that will still have to build them
+    on every restore. Three small requests are what puts that work inside the
+    snapshot instead of after it.
+    """
+    payload = {
+        "model": config.public_model_name,
+        "messages": [{"role": "user", "content": "Who are you?"}],
+        "max_tokens": 16,
+        "temperature": 0.0,
+    }
+    for index in range(rounds):
+        response = httpx.post(
+            f"{config.base_url}/v1/chat/completions", json=payload, timeout=timeout
+        )
+        response.raise_for_status()
+        log(f"warmup {index + 1}/{rounds} ok")
+
+
+def sleep_vllm(config: WorkerConfig, *, level: int = 1, timeout: float = 300.0) -> None:
+    """Offload the weights to CPU memory and drop the KV cache.
+
+    Level 1 keeps the weights in host RAM, which is what makes the snapshot a
+    fixed, restorable thing rather than a photograph of 29 GB of device memory
+    the next container may not be able to reproduce.
+
+    Requires `VLLM_SERVER_DEV_MODE=1`; without it the route does not exist and
+    vLLM answers 404.
+    """
+    try:
+        response = httpx.post(f"{config.base_url}/sleep?level={level}", timeout=timeout)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise SleepModeError(
+            f"vLLM would not sleep: {exc}. "
+            "Sleep mode needs VLLM_SERVER_DEV_MODE=1 in the image and "
+            "--enable-sleep-mode on the command line."
+        ) from exc
+
+
+def wake_vllm(config: WorkerConfig, *, timeout: float = 300.0) -> None:
+    """Bring the weights back to the GPU after a snapshot restore."""
+    try:
+        response = httpx.post(f"{config.base_url}/wake_up", timeout=timeout)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise SleepModeError(f"vLLM would not wake up: {exc}") from exc
 
 
 # -- startup accounting -------------------------------------------------
