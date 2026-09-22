@@ -27,6 +27,12 @@ dev = [
     "mypy>=1.13",
     "respx>=0.22",
 ]
+# The Modal client is a *deployment* tool, not a runtime dependency: it runs on
+# the machine that deploys, and Modal injects its own copy into every container.
+# Listing it here rather than in `dependencies` keeps it out of the image.
+modal = [
+    "modal>=1.5.5",
+]
 
 [project.scripts]
 worker-preflight = "worker.cli:preflight_main"
@@ -42,7 +48,7 @@ packages = ["src/worker", "tools/runpod_deployer"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tools", "tests"]
+src = ["src", "tools", "tests", "."]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TID", "RUF", "ASYNC", "PL", "S"]
@@ -56,12 +62,12 @@ ignore = [
 "tests/*" = ["PLR2004", "S101", "S105", "S106"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["worker", "runpod_deployer"]
+known-first-party = ["worker", "runpod_deployer", "infra"]
 
 [tool.mypy]
 python_version = "3.12"
-mypy_path = "src:tools"
-packages = ["worker", "runpod_deployer"]
+mypy_path = "src:tools:."
+packages = ["worker", "runpod_deployer", "infra"]
 strict = true
 warn_unreachable = true
 plugins = []

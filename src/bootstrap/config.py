@@ -109,6 +109,33 @@ class Settings(BaseSettings):
     Empty means the engines are open, which on an exposed Pod means open to
     the internet. An empty value sends no header rather than a literal
     "Bearer ".
+
+    On a Modal Server the value is a proxy token, `wk-<id>.ws-<secret>`. Modal
+    accepts the pair joined by a period in exactly this header, which is why
+    moving to Modal needs no new authentication mechanism here.
+    """
+
+    inference_scale_to_zero: bool = False
+    """Whether the inference endpoint is serverless and may have no worker.
+
+    Set it for a Modal Server, leave it off for a RunPod Pod. It changes what
+    HTTP 503 means: on a serverless endpoint the platform answers 503 from its
+    proxy when the pool is empty and boots a container in response, so the
+    status means "the GPU is starting" and the adapter waits. On a dedicated
+    Pod the same status means something is wrong, and waiting would hide it.
+
+    Leaving this off against a Modal endpoint produces a specific and expensive
+    failure: every first request after an idle period fails, the job is
+    requeued, and the retried job runs on the container the failed one paid to
+    start — a cold start billed on every cycle and attributed to nothing.
+    """
+
+    inference_cold_start_max_wait_seconds: float = 900.0
+    """How long a request may wait for a serverless worker to appear.
+
+    Separate from `llm_request_timeout_seconds` because it measures a different
+    thing: a container booting, not a model generating. It should cover a cold
+    vLLM start — weights resident, CUDA graphs captured — with margin.
     """
 
     # -- scheduling and jobs --------------------------------------------

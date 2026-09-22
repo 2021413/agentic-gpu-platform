@@ -1,7 +1,15 @@
 # Agentic GPU Worker
 
-A reproducible RunPod GPU worker image that serves
-`Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` through vLLM's OpenAI-compatible API.
+A reproducible GPU worker that serves `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8`
+through vLLM's OpenAI-compatible API, on two platforms from one codebase:
+
+* **[Modal](docs/modal.md)** — a serverless Server on an H100, scaled to zero
+  when idle, billed by the second. `infra/modal/`, no image to build or push.
+* **[RunPod](docs/runpod.md)** — a Pod from the image in this directory, billed
+  from creation to destruction.
+
+`src/worker/` is shared: the same configuration, the same model preparation and
+the same readiness check run under both.
 
 ```text
 RunPod GPU Pod
@@ -24,7 +32,25 @@ same volume attached does **not** re-download 31 GB.
 
 ---
 
-## Quick start
+## Quick start — Modal
+
+No image to build, no registry, no Pod to remember to destroy.
+
+```bash
+uv pip install -e '.[modal]'
+modal setup
+modal secret create agentic-gpu-worker HF_TOKEN=hf_...
+modal run scripts/populate_modal_volume.py   # once: 31.2 GB onto the Volume, CPU only
+modal deploy infra/modal/app.py
+```
+
+The Server answers **503 while it has no container**, and boots one in response
+to that same request. Callers must expect it; the control plane does, once
+`INFERENCE_SCALE_TO_ZERO=true`. Full guide: [`docs/modal.md`](docs/modal.md).
+
+---
+
+## Quick start — RunPod
 
 ```bash
 docker build -t agentic-gpu-worker:1.0.0 .
@@ -173,7 +199,8 @@ is redacted from every log and error path. See
 
 | | |
 |---|---|
-| [`docs/runpod.md`](docs/runpod.md) | deployment, networking, scaling, why not Serverless |
+| [`docs/modal.md`](docs/modal.md) | **serverless H100, scale-to-zero**: setup, profiles, cost, the 503 contract |
+| [`docs/runpod.md`](docs/runpod.md) | deployment, networking, scaling, why not RunPod Serverless |
 | [`docs/changing-the-model.md`](docs/changing-the-model.md) | **serving a different model**: measuring it, sizing, pinning, verifying |
 | [`docs/persistent-storage.md`](docs/persistent-storage.md) | layout, sizing, the marker, the lock |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | every failure mode and its diagnostic |

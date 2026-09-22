@@ -93,11 +93,44 @@ class OpenAICompatibleSettings:
     max_keepalive_connections: int = 8
     extra_headers: Mapping[str, str] = field(default_factory=lambda: _EMPTY_HEADERS)
 
+    scale_to_zero: bool = False
+    """Whether this endpoint may legitimately have no worker running.
+
+    A serverless GPU platform — Modal Servers in particular — answers **503**
+    from its proxy when the pool is empty, and starts a container in response to
+    that same request. The status therefore means "the GPU is booting, ask
+    again", not "the worker is broken". Two behaviours change when this is set:
+
+    * ``health()`` reports a scaled-to-zero endpoint as healthy. Otherwise the
+      worker registry would evict the worker for being idle, which is the state
+      it is supposed to be in almost all of the time.
+    * ``complete()`` and ``stream()`` wait for capacity instead of failing.
+      Without that, the first request after an idle period fails, the job is
+      requeued by the retry policy, and the *second* job lands on the container
+      the first one paid to start.
+
+    Off by default: on a dedicated Pod, 503 means something is actually wrong.
+    """
+
+    cold_start_max_wait_seconds: float = 900.0
+    """How long a request may wait for a container, when ``scale_to_zero``.
+
+    Bounds the wait separately from the completion timeout, because they measure
+    different things: a cold vLLM start moves 31 GB and compiles kernels, and
+    charging that to the generation budget would time out every first request.
+    """
+
+    cold_start_poll_seconds: float = 3.0
+
     def __post_init__(self) -> None:
         if self.context_length <= 0:
             raise ValueError("context_length must be positive")
         if self.default_timeout_seconds <= 0:
             raise ValueError("default_timeout_seconds must be positive")
+        if self.cold_start_max_wait_seconds < 0:
+            raise ValueError("cold_start_max_wait_seconds must not be negative")
+        if self.cold_start_poll_seconds <= 0:
+            raise ValueError("cold_start_poll_seconds must be positive")
 
 
 class OpenAICompatibleLLMProvider:
@@ -144,9 +177,20 @@ class OpenAICompatibleLLMProvider:
                 return False
             if response.status_code < httpx.codes.BAD_REQUEST:
                 return True
+            if self._is_cold(response):
+                # Scaled to zero, which is the resting state of a serverless
+                # worker, not a fault. Probing it awake would defeat the point.
+                return True
             if response.status_code != httpx.codes.NOT_FOUND:
                 return False
         return False
+
+    def _is_cold(self, response: httpx.Response) -> bool:
+        """Whether this response means "no container yet", rather than a fault."""
+        return (
+            self._settings.scale_to_zero
+            and response.status_code == httpx.codes.SERVICE_UNAVAILABLE
+        )
 
     # -- request building ------------------------------------------------
     def _model_for(self, request: CompletionRequest) -> str:
@@ -228,24 +272,54 @@ class OpenAICompatibleLLMProvider:
         )
 
     # -- transport -------------------------------------------------------
+    async def _wait_for_capacity(self, waited: float, *, model: str) -> float:
+        """Sleep before retrying a cold endpoint. Returns the new elapsed total.
+
+        Raises rather than returning when the budget is gone, because the caller
+        has nothing useful left to do with a 503: the platform never queued the
+        request, so no worker is going to answer it.
+        """
+        budget = self._settings.cold_start_max_wait_seconds
+        if waited >= budget:
+            raise InferenceError(
+                f"no worker became available within {budget:g}s",
+                status_code=int(httpx.codes.SERVICE_UNAVAILABLE),
+                model=model,
+            )
+        interval = min(self._settings.cold_start_poll_seconds, budget - waited)
+        await asyncio.sleep(interval)
+        return waited + interval
+
     async def _post(self, payload: Mapping[str, Any], request: CompletionRequest) -> dict[str, Any]:
         model = self._model_for(request)
-        http_request = self._build_request(payload, request)
-        try:
-            async with asyncio.timeout(self._timeout_seconds(request)):
-                response = await self._client.send(http_request, stream=True)
-                try:
-                    await response.aread()
-                finally:
-                    await response.aclose()
-        except TimeoutError as exc:
-            raise LLMTimeoutError(self._timeout_seconds(request), model=model) from exc
-        except httpx.TimeoutException as exc:
-            raise LLMTimeoutError(self._timeout_seconds(request), model=model) from exc
-        except httpx.HTTPError as exc:
-            raise InferenceError(
-                f"inference request failed: {type(exc).__name__}", model=model
-            ) from exc
+        waited = 0.0
+        while True:
+            # Rebuilt each attempt: an httpx.Request carries a consumed stream
+            # once it has been sent, and reusing one silently sends an empty body.
+            http_request = self._build_request(payload, request)
+            try:
+                # The cold-start wait is deliberately outside this timeout. It
+                # measures a container booting, not a model generating, and
+                # charging it to the completion budget would time out every
+                # first request after an idle period.
+                async with asyncio.timeout(self._timeout_seconds(request)):
+                    response = await self._client.send(http_request, stream=True)
+                    try:
+                        await response.aread()
+                    finally:
+                        await response.aclose()
+            except TimeoutError as exc:
+                raise LLMTimeoutError(self._timeout_seconds(request), model=model) from exc
+            except httpx.TimeoutException as exc:
+                raise LLMTimeoutError(self._timeout_seconds(request), model=model) from exc
+            except httpx.HTTPError as exc:
+                raise InferenceError(
+                    f"inference request failed: {type(exc).__name__}", model=model
+                ) from exc
+
+            if not self._is_cold(response):
+                break
+            waited = await self._wait_for_capacity(waited, model=model)
 
         self._raise_for_status(response, model=model)
         return _json_object(response.text, model=model)
@@ -275,15 +349,23 @@ class OpenAICompatibleLLMProvider:
         """
         model = self._model_for(request)
         payload = self._chat_payload(request, stream=True)
-        http_request = self._build_request(payload, request)
-        try:
-            response = await self._client.send(http_request, stream=True)
-        except httpx.TimeoutException as exc:
-            raise LLMTimeoutError(self._timeout_seconds(request), model=model) from exc
-        except httpx.HTTPError as exc:
-            raise InferenceError(
-                f"inference stream could not be opened: {type(exc).__name__}", model=model
-            ) from exc
+        waited = 0.0
+        while True:
+            http_request = self._build_request(payload, request)
+            try:
+                response = await self._client.send(http_request, stream=True)
+            except httpx.TimeoutException as exc:
+                raise LLMTimeoutError(self._timeout_seconds(request), model=model) from exc
+            except httpx.HTTPError as exc:
+                raise InferenceError(
+                    f"inference stream could not be opened: {type(exc).__name__}", model=model
+                ) from exc
+            if not self._is_cold(response):
+                break
+            # A cold 503 carries a body that must be released before the
+            # connection can be reused for the retry.
+            await response.aclose()
+            waited = await self._wait_for_capacity(waited, model=model)
 
         try:
             if response.status_code >= httpx.codes.BAD_REQUEST:

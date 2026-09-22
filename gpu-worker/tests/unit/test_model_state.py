@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.conftest import FakeClock, Recorder
 
+from tests.conftest import FakeClock, Recorder
 from worker.config import ConfigError, PersistentLayout, Secret, WorkerConfig
 from worker.filesystem import StorageError
 from worker.model_state import (
@@ -792,3 +792,69 @@ def test_a_zero_attempt_budget_never_tries_at_all(
         make_config(download_max_attempts=0)
 
     assert caught.value.variable == "MODEL_DOWNLOAD_MAX_ATTEMPTS"
+
+
+# -- filesystems that do not implement flock -------------------------------
+#
+# A Modal Volume is one. So are several NFS and FUSE mounts. `flock` there fails
+# with ENOSYS or EOPNOTSUPP rather than EWOULDBLOCK, and reading that as "held by
+# somebody else" means waiting out the whole timeout — two hours by default —
+# before blaming a process that never existed.
+
+
+def test_a_filesystem_without_flock_does_not_wait(
+    layout: PersistentLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unsupported(_fd: int, _operation: int) -> None:
+        raise OSError(errno.ENOSYS, "function not implemented")
+
+    def must_not_sleep(_seconds: float) -> None:
+        raise AssertionError("waited for a lock the filesystem cannot provide")
+
+    monkeypatch.setattr("worker.model_state.fcntl.flock", unsupported)
+    monkeypatch.setattr("worker.model_state.time.sleep", must_not_sleep)
+
+    waits: list[str] = []
+    with download_lock(
+        layout,
+        timeout_seconds=7200.0,
+        on_wait=lambda _remaining, holder: waits.append(holder),
+    ):
+        pass
+
+    assert waits == ["lock unsupported here (Function not implemented)"], (
+        "the caller is told the lock is absent rather than left to guess"
+    )
+
+
+def test_an_unsupported_lock_is_not_released_on_the_way_out(
+    layout: PersistentLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlocking a descriptor that was never locked raises on the same mounts."""
+    calls: list[int] = []
+
+    def unsupported(_fd: int, operation: int) -> None:
+        calls.append(operation)
+        raise OSError(errno.EOPNOTSUPP, "operation not supported")
+
+    monkeypatch.setattr("worker.model_state.fcntl.flock", unsupported)
+
+    with download_lock(layout, timeout_seconds=1.0):
+        pass
+
+    assert calls == [fcntl.LOCK_EX | fcntl.LOCK_NB], "no LOCK_UN on a lock never taken"
+
+
+def test_real_contention_is_still_waited_out(layout: PersistentLayout) -> None:
+    """The unsupported-lock branch must not swallow genuine contention."""
+    holder = layout.download_lock.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with (
+            pytest.raises(LockTimeoutError),
+            download_lock(layout, timeout_seconds=0.05, poll_seconds=0.01),
+        ):
+            pass
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()

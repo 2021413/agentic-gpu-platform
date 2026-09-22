@@ -9,8 +9,8 @@ from pathlib import Path
 
 import httpx
 import pytest
-from tests.conftest import requires_unprivileged
 
+from tests.conftest import requires_unprivileged
 from worker.config import WorkerConfig
 from worker.filesystem import (
     GIB,
