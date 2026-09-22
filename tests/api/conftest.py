@@ -25,6 +25,7 @@ from tests.application.fakes import (
     uow_factory_for,
 )
 
+from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
@@ -47,7 +48,10 @@ from application.use_cases.workers import (
     ListWorkersUseCase,
     RegisterWorkerUseCase,
 )
+from domain.entities.run import Run
+from domain.exceptions import EntityNotFoundError
 from domain.services.task_complexity import HeuristicTaskComplexityPolicy
+from domain.value_objects.identifiers import RunId
 from interfaces.api.app import create_api
 from interfaces.api.dependencies.container import ApiDependencies
 from interfaces.api.dependencies.readiness import DependencyHealth, ReadinessReport
@@ -91,6 +95,20 @@ class Harness:
     headers: dict[str, str] = field(default_factory=dict)
 
 
+class _NoApprovals:
+    """Approval is an orchestrator operation; these are route tests.
+
+    Refusing rather than returning a stub run: a test that reached this would
+    be testing nothing, and should say so loudly.
+    """
+
+    async def approve(self, run_id: RunId) -> Run:
+        raise EntityNotFoundError("Run", run_id)
+
+    async def reject(self, run_id: RunId, *, reason: str) -> Run:
+        raise EntityNotFoundError("Run", run_id)
+
+
 @pytest.fixture
 def harness() -> Harness:
     store = _Store()
@@ -119,6 +137,7 @@ def harness() -> Harness:
         list_runs=ListRunsUseCase(uow_factory=uow_factory),
         candidate_patch=GetCandidatePatchUseCase(uow_factory=uow_factory),
         list_reviews=ListReviewsUseCase(uow_factory=uow_factory),
+        approve_run=ApproveRunUseCase(orchestrator=_NoApprovals()),
         list_run_events=ListRunEventsUseCase(uow_factory=uow_factory),
         list_workers=ListWorkersUseCase(registry=registry),
         register_worker=RegisterWorkerUseCase(
