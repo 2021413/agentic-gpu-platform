@@ -257,6 +257,53 @@ worker peut être en train de démarrer. La correction n'est pas faite.
 
 ---
 
+## 13. Le format « fichiers entiers » ne survit pas à un gros fichier
+
+C'est la découverte la plus importante des runs du 22 septembre au soir, et
+seule une exécution réelle pouvait la produire.
+
+Objectif donné au coder : ajouter un validateur de dix lignes dans
+`src/bootstrap/config.py` (357 lignes), plus deux tests. Les **quatre premières
+lignes du patch sont exactement ce qui était demandé** — la condition, le
+message, le nom de la variable :
+
+```python
+if self.environment.is_production and self.service_token.get_secret_value() == "dev-service-token-change-me":
+    raise ValueError(
+        "SERVICE_TOKEN is set to the published default value. "
+        "This value is public and anyone can authenticate with it. "
+```
+
+Puis, dans le même fichier, il a **réécrit entièrement la classe
+`WorkerSettings`** à laquelle on ne lui demandait rien. Il a perdu des champs
+qui existaient (`model_id`, `model_context_length`, `llm_provider`,
+`worker_concurrency`, `gpu_type`), il y a recopié des champs qui appartiennent à
+`Settings` (`workspace_root`, `artifact_root`, `executor_concurrency`,
+`reaper_interval_seconds`, `static_analysis_is_blocking`), et il a ajouté un
+`_check_coherence` qui référence `heartbeat_interval_seconds` sans le déclarer.
+Résultat :
+
+```
+PydanticUserError: check_decorator_fields_exist
+```
+
+Le module ne s'importe plus, donc **tous** les tests échouent à la collecte, et
+les trois tours de réparation n'y ont rien changé : chaque tour recevait la même
+erreur d'import et réécrivait le même fichier entier. 224 lignes de churn pour
+une modification qui en demandait une quinzaine.
+
+Ce que cela dit du format : réécrire un fichier entier oblige le modèle à
+reproduire de mémoire tout ce qu'il ne touche pas. Sur 50 lignes c'est gratuit,
+et le rapport le notait comme un succès. Sur 357 lignes contenant deux classes
+de configuration qui se ressemblent, il reconstruit la mauvaise.
+
+**Pistes, aucune faite :** passer à un format d'édition localisée pour les
+fichiers au-delà d'un certain seuil ; ou refuser en validation un patch qui
+touche des symboles absents des `target_paths` du planner ; ou, au minimum,
+compter cela comme un signal distinct de « les tests échouent » — un module qui
+ne s'importe plus n'est pas un test rouge, c'est un fichier cassé, et le coder
+gagnerait à ce qu'on le lui dise dans ces termes.
+
 ## Ce qui a été vérifié et fonctionne
 
 Pour l'équilibre, et parce que ces points ne doivent pas être re-testés à
@@ -270,7 +317,8 @@ chaque doute :
 - **la sortie structurée** via `response_format: json_schema` : planner, coder
   et reviewer ont tous produit du JSON valide contre vLLM 0.28 ;
 - **le format « fichiers entiers »** : patch propre et diffable, 50 lignes,
-  zéro artefact sur un dépôt propre ;
+  zéro artefact sur un dépôt propre — **mais voir le point 13, qui montre où
+  ce format cesse de tenir** ;
 - **la clé d'inférence** arrive jusqu'à l'adaptateur (ce ne fut pas toujours
   le cas : elle était câblée dans le code et absente du compose) ;
 - **753 tests**, ruff et mypy propres.
@@ -279,8 +327,11 @@ chaque doute :
 
 ## Priorités suggérées
 
-1. **Relancer un run réel** dès qu'il y a de la capacité GPU. Tout le reste de
-   cette liste est de l'hypothèse tant que ce n'est pas fait.
+1. ~~Relancer un run réel~~ **Fait le 22 septembre au soir**, trois fois, contre
+   une H100 Modal. La chaîne complète fonctionne : plan, code, build, test,
+   réparation. Le point 13 est ce qu'il faut corriger en premier — c'est lui qui
+   a fait échouer le run le plus abouti, et il touche tout objectif qui vise un
+   fichier de plus de quelques centaines de lignes.
 2. **Mesurer** le nombre de tours de réparation avec la nouvelle information
    avant de toucher `max_repair_iterations`.
 3. **Image de bac à sable par projet** (point 5) si l'on veut autre chose que
