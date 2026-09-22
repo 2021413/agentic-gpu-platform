@@ -467,10 +467,19 @@ class RunOrchestrator:
             candidate = await self._require_candidate(uow, candidate_id)
             plan = await uow.plans.latest_for_run(run.id)
             reviews = await uow.reviews.list_by_candidate(candidate_id)
+            evidence = list(await uow.tool_results.list_by_candidate(candidate_id))
 
         workspace = await self._require_workspace(candidate)
         context = await self._build_context(
-            workspace=workspace, run=run, role=AgentRole.CODER, candidate_id=candidate_id
+            workspace=workspace,
+            run=run,
+            role=AgentRole.CODER,
+            candidate_id=candidate_id,
+            # On a repair, the files this candidate already touched are put in
+            # front of it rather than searched for. Whether a term from the
+            # objective happens to match the file it wrote is luck, and a coder
+            # asked to fix code it cannot see rewrites it from scratch.
+            paths=candidate.patch.changed_paths if candidate.patch else (),
         )
         repair_brief = reviews[-1].repair_brief() if reviews else None
 
@@ -489,6 +498,7 @@ class RunOrchestrator:
                 context=context,
                 plan=plan,
                 repair_brief=repair_brief,
+                tool_output=_recent_tool_evidence(evidence),
             )
             worker_id = acquired.worker.id
 
@@ -1009,7 +1019,13 @@ class RunOrchestrator:
             await self._queue.enqueue(job)
 
     async def _build_context(
-        self, *, workspace: WorkspaceHandle, run: Run, role: AgentRole, candidate_id: object = None
+        self,
+        *,
+        workspace: WorkspaceHandle,
+        run: Run,
+        role: AgentRole,
+        candidate_id: object = None,
+        paths: Sequence[str] = (),
     ) -> RepositoryContext:
         """Build the view of the repository, and record what it contained.
 
@@ -1019,7 +1035,7 @@ class RunOrchestrator:
         for afterwards. An empty selection — the defect that had every agent
         inventing code from a filename list — shows up here as no files at all.
         """
-        request = await self._context_request(run.objective, role=role)
+        request = await self._context_request(run.objective, role=role, paths=paths)
         context = await self._context.build(workspace=workspace, request=request)
         event = RepositoryContextSelected(
             occurred_at=self._clock.now(),
@@ -1042,7 +1058,9 @@ class RunOrchestrator:
         await self._bus.publish([event])
         return context
 
-    async def _context_request(self, objective: str, *, role: AgentRole) -> ContextRequest:
+    async def _context_request(
+        self, objective: str, *, role: AgentRole, paths: Sequence[str] = ()
+    ) -> ContextRequest:
         """Size the repository view against what the fleet can actually hold.
 
         The configured ceiling was 24000 while the engines were served with
@@ -1067,6 +1085,7 @@ class RunOrchestrator:
             max_tokens = budget
         return ContextRequest(
             objective=objective,
+            paths=tuple(paths),
             max_files=self._config.context_max_files,
             max_tokens=max_tokens,
         )
@@ -1149,6 +1168,23 @@ _FAILURE_KINDS: Final[tuple[tuple[type[Exception], FailureKind], ...]] = (
     (ToolExecutionError, FailureKind.TOOL),
     (WorkspaceError, FailureKind.INFRASTRUCTURE),
 )
+
+
+def _recent_tool_evidence(results: Sequence[ToolResult], *, limit: int = 3) -> str:
+    """What the deterministic tools said, for the agent that can act on it.
+
+    The reviewer has always received this and cannot change a line; the coder
+    never did and is the only thing that can. Three real runs spent their whole
+    repair budget re-deriving the same code because nothing told them what
+    failed.
+
+    Failures first and most recent first: a build that broke before the tests
+    ran explains more than a test that never got the chance. An empty string
+    when nothing has run yet, because inventing evidence is worse than none.
+    """
+    failures = [r for r in reversed(results) if not r.succeeded]
+    chosen = failures[:limit] or list(reversed(results))[:1]
+    return "\n\n".join(f"$ {r.command}\nexit={r.exit_code}\n{r.tail(2000)}" for r in chosen)
 
 
 def _classify(exc: Exception) -> FailureKind:
