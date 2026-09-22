@@ -129,6 +129,7 @@ Defined in `infra/modal/config.py`, selected by `MODAL_PROFILE`:
 | `min_containers` | 0 | 0 |
 | `max_containers` | 1 | 4 |
 | `scaledown_window` | 130 s | 130 s |
+| `MAX_MODEL_LEN` | 65536 | 65536 |
 | `startup_timeout` | 900 s | 900 s |
 | `exit_grace_period` | 120 s | 300 s |
 | `unauthenticated` | allowed | **refused** |
@@ -370,6 +371,26 @@ does not pay for itself here either.
 
 Revisit if Modal extends snapshot capture to subprocesses, or if this worker
 moves to `@app.cls`.
+
+## The context window is a control-plane decision too
+
+The engine serves `MAX_MODEL_LEN=65536`, and the number was not picked for the
+GPU's comfort. The control plane reserves 4096 tokens for the answer and now a
+further 2048 for the prompt that is not code — instructions, objective, plan,
+accumulated review findings, JSON schema. What is left is what a coder has to
+read a repository with:
+
+```text
+16384  ->  12288 usable     the original, sized for a shared RunPod pod
+32768  ->  26624 usable     failed by one token on the first real planner call
+65536  ->  59392 usable
+```
+
+An H100 holding 29.13 GiB of FP8 weights has room to spare, so the binding
+constraint here was never the KV cache — it was a number chosen before anyone
+had measured what a prompt actually costs. The agent reconciles whatever the
+engine reports through `/v1/models` at registration, so this cannot silently
+disagree with what the control plane advertises.
 
 ## What is still unproven
 
