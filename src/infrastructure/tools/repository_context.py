@@ -25,9 +25,15 @@ import asyncio
 import fnmatch
 import re
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from domain.ports.repository_context import ContextRequest, FileExcerpt, RepositoryContext
+from domain.ports.repository_context import (
+    CHARS_PER_TOKEN,
+    ContextRequest,
+    FileExcerpt,
+    RepositoryContext,
+    estimate_tokens,
+)
 from domain.ports.tools import SandboxExecutor
 from domain.value_objects.tools import ExecutionLimits
 from domain.value_objects.workspace import WorkspaceHandle
@@ -41,8 +47,8 @@ __all__ = [
     "search_terms",
 ]
 
-CHARS_PER_TOKEN = 4
-"""The estimation constant. Documented, crude, and honest about being crude."""
+# Defined by the port so the budget and the reported cost are one rule.
+# Re-exported here because this module's public surface has always carried it.
 
 _DEFAULT_EXCLUDES = (
     "*.png",
@@ -71,11 +77,6 @@ _DEFAULT_EXCLUDES = (
 _CONTEXT_LIMITS = ExecutionLimits(
     timeout_seconds=60.0, max_output_bytes=4_000_000, network_enabled=False
 )
-
-
-def estimate_tokens(text: str) -> int:
-    """Crude character-based token estimate; see the module docstring."""
-    return (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
 
 
 class RipgrepRepositoryContextProvider:
@@ -119,14 +120,14 @@ class RipgrepRepositoryContextProvider:
             f"search engine: {self._backend.engine}",
         ]
 
+        files = await self._list_files(workspace, excludes)
         tree: tuple[str, ...] = ()
         if request.include_tree:
-            files = await self._list_files(workspace, excludes)
             tree = files[: self._max_tree_entries]
             if len(files) > len(tree):
                 notes.append(f"file tree truncated to {len(tree)} of {len(files)} files")
 
-        ranked = await self._rank(workspace, request, excludes)
+        ranked = await self._rank(workspace, request, excludes, paths=files)
         excerpts: list[FileExcerpt] = []
         used_tokens = 0
         skipped_for_budget = 0
@@ -221,6 +222,8 @@ class RipgrepRepositoryContextProvider:
         workspace: WorkspaceHandle,
         request: ContextRequest,
         excludes: Sequence[str],
+        *,
+        paths: Sequence[str] = (),
     ) -> tuple[tuple[str, int, str], ...]:
         """Order candidate files: explicit paths first, then by match count.
 
@@ -237,19 +240,41 @@ class RipgrepRepositoryContextProvider:
         # caller that passed only an objective — which is every caller in
         # production — got an empty ranking and the agents got a file tree with
         # no code in it.
-        searches: list[tuple[str, bool]] = [(query, True) for query in request.queries]
-        searches += [(term, False) for term in search_terms(request.objective)]
+        derived = search_terms(request.objective)
 
-        for query, case_sensitive in searches:
-            matches = await self._safe_matches(workspace, query, case_sensitive=case_sensitive)
-            counts: dict[str, list[SearchMatch]] = {}
-            for match in matches:
-                counts.setdefault(match.path, []).append(match)
-            for path, hits in sorted(counts.items(), key=lambda item: (-len(item[1]), item[0])):
+        async def search(pairs: Sequence[tuple[str, bool]]) -> None:
+            for query, case_sensitive in pairs:
+                matches = await self._safe_matches(workspace, query, case_sensitive=case_sensitive)
+                counts: dict[str, list[SearchMatch]] = {}
+                for match in matches:
+                    counts.setdefault(match.path, []).append(match)
+                for path, hits in sorted(counts.items(), key=lambda i: (-len(i[1]), i[0])):
+                    if path in seen or _excluded(path, excludes):
+                        continue
+                    seen.add(path)
+                    ordered.append(
+                        (path, hits[0].line_number, f"{len(hits)} match(es) for {query!r}")
+                    )
+
+        # Precedence, strongest first: what the caller named, what the caller
+        # searched for, then what the objective suggests. The objective is a
+        # fallback and must never push an explicit query down the list.
+        await search([(query, True) for query in request.queries])
+
+        # A term that names a file is the strongest signal there is, and it
+        # costs no search. "the packet parser" must find parser.py even when
+        # the word "parser" appears nowhere inside it — which is exactly the
+        # case that came back with an empty selection.
+        for term in derived:
+            needle = term.lower()
+            for path in paths:
                 if path in seen or _excluded(path, excludes):
                     continue
-                seen.add(path)
-                ordered.append((path, hits[0].line_number, f"{len(hits)} match(es) for {query!r}"))
+                if needle in PurePosixPath(path).name.lower():
+                    seen.add(path)
+                    ordered.append((path, 1, f"file name matches {term!r}"))
+
+        await search([(term, False) for term in derived])
         return tuple(ordered)
 
     async def _safe_matches(

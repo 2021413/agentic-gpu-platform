@@ -17,6 +17,7 @@ against the real ASGI app.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -256,3 +257,41 @@ async def test_a_project_says_which_commands_it_will_run(
     assert toolchain["language"] == "python"
     assert toolchain["build_command"] == "/bin/true"
     assert toolchain["test_command"] == "/bin/true"
+
+
+async def test_the_stream_says_what_the_agent_was_shown(
+    client: httpx.AsyncClient,
+    container: Container,
+    agent: WorkerAgent,
+    sample_repository: Path,
+) -> None:
+    """The manifest a viewer builds the file tree from.
+
+    Published as an event so it arrives live, while the run is going, and lands
+    in the audit log for afterwards. An empty selection — the defect that had
+    every agent inventing code from a filename list — is visible here as a
+    manifest with no files in it.
+    """
+    await agent.start()
+    project = await create_project(client, sample_repository)
+    created = await create_run(client, project["id"], candidate_count=1)
+    await advance(container)
+
+    stream = await client.get(f"/v1/runs/{created['id']}/events", params={"replay_only": True})
+    assert stream.status_code == 200, stream.text
+
+    manifests = [
+        json.loads(line[len("data:") :])
+        for line in stream.text.splitlines()
+        if line.startswith("data:")
+    ]
+    selected = [m for m in manifests if m.get("name") == "context.selected"]
+    seen_names = sorted({m.get("name") for m in manifests})
+    assert selected, f"no context manifest on the stream: {seen_names}"
+
+    payload = selected[0]["payload"]
+    assert payload["files"], "the agent was shown no code at all"
+    assert payload["tree"], "the file tree is missing"
+    assert payload["estimated_tokens"] > 0
+    assert payload["budget_tokens"] >= payload["estimated_tokens"]
+    assert payload["role"] in ("PLANNER", "CODER")

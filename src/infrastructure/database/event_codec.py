@@ -110,6 +110,14 @@ def _converters(event_type: type[DomainEvent]) -> Mapping[str, Callable[[Any], A
 
 def _converter_for(annotation: Any) -> Callable[[Any], Any]:
     target = _unwrap_optional(annotation)
+    origin = get_origin(target)
+    if origin in (tuple, frozenset, set):
+        # JSON has no tuple. Restoring one as a list makes the rebuilt event
+        # unequal to the event that was stored — which is silent, and which
+        # breaks anything comparing an event to what it published.
+        item = _converter_for(_element_type(target))
+        builder = origin
+        return _optional(lambda value: builder(item(v) for v in value))
     if not isinstance(target, type):
         return _identity
     if issubclass(target, EntityId):
@@ -128,6 +136,12 @@ def _optional(convert: Callable[[Any], Any]) -> Callable[[Any], Any]:
         return None if value is None else convert(value)
 
     return read
+
+
+def _element_type(annotation: Any) -> Any:
+    """The element type of ``tuple[X, ...]`` / ``set[X]``, or ``Any``."""
+    args = [arg for arg in get_args(annotation) if arg is not Ellipsis]
+    return args[0] if args else Any
 
 
 def _unwrap_optional(annotation: Any) -> Any:

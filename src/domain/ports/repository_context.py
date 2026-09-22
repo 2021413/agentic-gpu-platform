@@ -17,6 +17,21 @@ from domain.value_objects.workspace import WorkspaceHandle
 __all__ = ["ContextRequest", "FileExcerpt", "RepositoryContext", "RepositoryContextProvider"]
 
 
+CHARS_PER_TOKEN = 4
+"""The estimation constant: crude, documented, and honest about being crude.
+
+Four characters per token is roughly right for code under a BPE tokenizer and
+can be wrong by a third either way. It lives in the port because both the
+provider that enforces the budget and the caller that reports the cost must
+use the same rule.
+"""
+
+
+def estimate_tokens(text: str) -> int:
+    """Crude character-based token estimate. See ``CHARS_PER_TOKEN``."""
+    return (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
+
+
 @dataclass(frozen=True, slots=True)
 class FileExcerpt:
     """A bounded slice of a file, with the line numbers it came from."""
@@ -30,6 +45,13 @@ class FileExcerpt:
     @property
     def line_count(self) -> int:
         return self.content.count("\n") + 1
+
+    @property
+    def estimated_tokens(self) -> int:
+        """What this excerpt costs in the prompt, by the same crude rule the
+        budget is enforced with. Defined here so the number the application
+        reports and the number the provider budgets against are one number."""
+        return estimate_tokens(self.content)
 
 
 @dataclass(frozen=True, slots=True)

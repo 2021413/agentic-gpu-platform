@@ -42,6 +42,7 @@ from domain.enums import (
     ReviewVerdict,
     RunStatus,
 )
+from domain.events.run import RepositoryContextSelected
 from domain.exceptions import (
     DomainError,
     EntityNotFoundError,
@@ -58,7 +59,11 @@ from domain.ports.clock import Clock, IdGenerator
 from domain.ports.event_bus import EventBus
 from domain.ports.job_queue import JobQueue
 from domain.ports.repositories import UnitOfWork
-from domain.ports.repository_context import ContextRequest, RepositoryContextProvider
+from domain.ports.repository_context import (
+    ContextRequest,
+    RepositoryContext,
+    RepositoryContextProvider,
+)
 from domain.ports.workspace import WorkspaceManager
 from domain.services.candidate_selection import DeterministicCandidateSelectionPolicy
 from domain.services.retry_policy import RetryPolicy
@@ -403,9 +408,8 @@ class RunOrchestrator:
             project=project, run_id=run.id, role=WorkspaceRole.PLANNER
         )
         try:
-            context = await self._context.build(
-                workspace=workspace,
-                request=await self._context_request(run.objective, role=AgentRole.PLANNER),
+            context = await self._build_context(
+                workspace=workspace, run=run, role=AgentRole.PLANNER
             )
             requirements = JobRequirements(
                 role=AgentRole.PLANNER,
@@ -465,9 +469,8 @@ class RunOrchestrator:
             reviews = await uow.reviews.list_by_candidate(candidate_id)
 
         workspace = await self._require_workspace(candidate)
-        context = await self._context.build(
-            workspace=workspace,
-            request=await self._context_request(run.objective, role=AgentRole.CODER),
+        context = await self._build_context(
+            workspace=workspace, run=run, role=AgentRole.CODER, candidate_id=candidate_id
         )
         repair_brief = reviews[-1].repair_brief() if reviews else None
 
@@ -1004,6 +1007,40 @@ class RunOrchestrator:
     async def _publish_jobs(self, jobs: Sequence[Job]) -> None:
         for job in jobs:
             await self._queue.enqueue(job)
+
+    async def _build_context(
+        self, *, workspace: WorkspaceHandle, run: Run, role: AgentRole, candidate_id: object = None
+    ) -> RepositoryContext:
+        """Build the view of the repository, and record what it contained.
+
+        The manifest is published rather than kept: it is evidence about one
+        inference, it reaches the live run stream so a viewer sees the
+        selection while the run is still going, and it lands in the audit log
+        for afterwards. An empty selection — the defect that had every agent
+        inventing code from a filename list — shows up here as no files at all.
+        """
+        request = await self._context_request(run.objective, role=role)
+        context = await self._context.build(workspace=workspace, request=request)
+        event = RepositoryContextSelected(
+            occurred_at=self._clock.now(),
+            run_id=run.id,
+            role=role,
+            candidate_id=candidate_id,  # type: ignore[arg-type]
+            files={e.path: e.estimated_tokens for e in context.excerpts},
+            tree=tuple(context.file_tree),
+            notes=tuple(context.notes),
+            estimated_tokens=context.estimated_tokens,
+            budget_tokens=request.max_tokens,
+        )
+        # Appended *and* published. Publishing alone reaches whoever is
+        # watching right now and nothing else: the durable log is written by
+        # the unit of work, so a live-only event vanishes from the replay and
+        # a viewer that opens the run afterwards sees no manifest at all.
+        async with self._uow_factory() as uow:
+            await uow.events.append([event])
+            await uow.commit()
+        await self._bus.publish([event])
+        return context
 
     async def _context_request(self, objective: str, *, role: AgentRole) -> ContextRequest:
         """Size the repository view against what the fleet can actually hold.
