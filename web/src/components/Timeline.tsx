@@ -6,8 +6,8 @@
  * the thing that is hardest to follow from a flat log.
  */
 
-import { useEffect, useState } from "react";
 import type { RunEvent } from "../api";
+import { ago, useNow } from "../time";
 
 const TONE: Record<string, string> = {
   "run.failed": "bad",
@@ -26,41 +26,6 @@ const TONE: Record<string, string> = {
 
 function clock(iso: string): string {
   return new Date(iso).toLocaleTimeString(undefined, { hour12: false });
-}
-
-/**
- * How long ago, in the coarsest unit that is still true.
- *
- * A clock time answers "when did that happen"; watching a run you are asking
- * "how long has it been stuck", and that is a subtraction you should not have
- * to do in your head. The unit is never smaller than a second because nothing
- * here is worth re-reading faster than that, and a future timestamp — clock
- * skew between the API host and this browser — is clamped to "now" rather than
- * rendered as a negative age.
- */
-function ago(iso: string, now: number): string {
-  const seconds = Math.floor(Math.max(0, now - new Date(iso).getTime()) / 1000);
-  if (seconds < 1) return "now";
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-/**
- * One clock for the whole list rather than a timer per row: the ages all move
- * together anyway, and a hundred intervals in a panel left open for an hour is
- * a cost paid for nothing.
- */
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  return now;
 }
 
 /** One line of detail, chosen per event type rather than dumping the payload. */

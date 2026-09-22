@@ -80,6 +80,13 @@ def _image_environment() -> dict[str, str]:
         "VLLM_IMAGE_TAG": VLLM_IMAGE,
         "MODEL_REVISION": VALIDATED_MODEL_REVISION,
         "VLLM_EXTRA_ARGS": VLLM_EXTRA_ARGS,
+        # 16384 was sized for a shared RunPod pod. An H100 holding 29 GB of FP8
+        # weights has roughly 45 GB left, so the KV cache is not what is scarce
+        # here — and the control plane reserves 4096 tokens for the answer, so a
+        # 16384 window left the coder 12288 to read a repository with. The model
+        # supports 262144; this is a deliberate middle, wide enough for real
+        # context and narrow enough that the cache stays comfortable.
+        "MAX_MODEL_LEN": os.environ.get("MAX_MODEL_LEN", "32768"),
         # Faster hub transfers. It only matters while the Volume is being
         # populated, on a CPU container, but the variable is read at import time
         # so it has to be in the image rather than set by the caller.

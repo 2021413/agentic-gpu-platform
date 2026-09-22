@@ -92,6 +92,19 @@ services:
       # not here was a 401 on every inference: the setting existed, the
       # container never saw it.
       INFERENCE_API_KEY: ${INFERENCE_API_KEY:-}
+      # Whether the endpoint behind a worker is serverless. The adapter reads
+      # it to decide what HTTP 503 means: on a Modal Server the proxy answers
+      # 503 from an empty pool and boots a container in response, so the right
+      # move is to wait; on a dedicated Pod it means something is broken.
+      # False against Modal fails every first request after an idle period and
+      # lets the retry run on the container the failed job paid to start.
+      INFERENCE_SCALE_TO_ZERO: ${INFERENCE_SCALE_TO_ZERO:-false}
+      INFERENCE_COLD_START_MAX_WAIT_SECONDS: ${INFERENCE_COLD_START_MAX_WAIT_SECONDS:-900}
+      # The prompt budget the control plane applies to EVERY worker: the
+      # adapter takes it from here, not from what the worker registered. Left
+      # to the code default it claims 262144 tokens against an engine serving
+      # far fewer, and the overflow surfaces as a failed generation.
+      MODEL_CONTEXT_LENGTH: ${MODEL_CONTEXT_LENGTH:-131072}
       RESERVED_OUTPUT_TOKENS: ${RESERVED_OUTPUT_TOKENS:-4096}
       REQUIRE_APPROVAL: ${REQUIRE_APPROVAL:-false}
       TOOL_SANDBOX_IMAGE: ${TOOL_SANDBOX_IMAGE:-python:3.12-slim}
@@ -159,9 +172,32 @@ services:
     environment:
       CONTROL_PLANE_URL: http://api:8000
       SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token-change-me}
-      WORKER_ENDPOINT: ${WORKER_ENDPOINT:-http://worker-gpu:9000}
+      # What the control plane will POST completions to: the adapter uses the
+      # registered endpoint as its base URL and appends /v1/chat/completions.
+      # So this is where vLLM listens, not the agent's own port — and it is
+      # fixed here rather than read from ${WORKER_ENDPOINT}, which .env sets
+      # to the fake worker's address for the default stack; inheriting it sent
+      # every GPU completion to worker-fake.
+      WORKER_ENDPOINT: http://worker-gpu:${VLLM_PORT:-8001}
       WORKER_PORT: "9000"
-      LLM_PROVIDER: vllm
+      # vLLM defaults to binding 127.0.0.1, which is reachable from the probe
+      # inside this container and from nowhere else — the control plane could
+      # never open a connection to the endpoint above. Bind the container's
+      # network interface; the port stays unpublished, so it is exposed to the
+      # compose network only.
+      VLLM_HOST: 0.0.0.0
+      # vLLM is reached over its OpenAI-compatible API like any other engine,
+      # so the adapter is openai_compatible. There is no `vllm` provider:
+      # LLMProviderKind admits openai_compatible and fake, and anything else
+      # makes WorkerSettings raise at startup, so this service never came up.
+      LLM_PROVIDER: openai_compatible
+      # The engine's ROOT, with no /v1: the probe appends /health and
+      # /v1/models itself, and a /v1 here turns those into /v1/health and
+      # /v1/v1/models, two 404s that disable the readiness gate and the
+      # model/context reconciliation without logging a failure. Set
+      # explicitly because docker/entrypoint-worker.sh otherwise defaults it
+      # to a value that carries the suffix.
+      INFERENCE_BASE_URL: http://127.0.0.1:${VLLM_PORT:-8001}
       # Must name what vLLM actually serves: the image defaults to the FP8
       # repository, and the agent reconciles against /v1/models anyway.
       MODEL_ID: ${MODEL_ID:-Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8}

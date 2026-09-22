@@ -38,6 +38,27 @@ pathlib.Path('/tmp/requirements.txt').write_text('\n'.join(pyproject['project'][
 " \
  && pip install --no-cache-dir -r /tmp/requirements.txt
 
+# pytest is not a dependency of the control plane; it is a dependency of the
+# *target projects* the control plane works on, and it has to live here because
+# this is where the deterministic tools actually execute. With ENVIRONMENT=local
+# the composition root picks SubprocessSandboxExecutor (container.py passes
+# `prefer_docker=not settings.environment.is_local`), so a tool command is a
+# child process of the API container and TOOL_SANDBOX_IMAGE is never consulted
+# at all. Without this line a Python target's `test_command` cannot start, and
+# every candidate is marked non-viable for a reason that is not about the code.
+#
+# Python only. Per-project sandbox images are a recorded not-done; adding gcc,
+# node, cargo and go here would be implementing that by the back door, in the
+# one image that is supposed to stay the control plane.
+# `pytest-asyncio` is not optional company for pytest here: the target
+# project sets `asyncio_mode = "auto"`, so without the plugin every async
+# fixture errors at setup — 38 errors out of 173 on a baseline that is
+# green on the host. A validation step that fails on unmodified code marks
+# every candidate non-viable for a reason that has nothing to do with the
+# code the agents wrote, which is the exact poison the repair loop must
+# not be fed.
+RUN pip install --no-cache-dir "pytest>=8.3" "pytest-asyncio>=0.24"
+
 # Then the project itself (console scripts agentic-api / agentic-worker).
 COPY src ./src
 # Prompt templates are runtime data the wheel force-includes: without them the
@@ -65,6 +86,24 @@ RUN apt-get update \
  && apt-get install --no-install-recommends -y git ripgrep ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && git --version && rg --version | head -1
+
+# The project under work is bind-mounted at /projects/current and belongs to the
+# host user (uid 1000), while this image runs as `app` (uid 10001). git refuses
+# a repository it does not own — "detected dubious ownership" — so the very
+# first worktree the orchestrator creates fails, and the run dies before a
+# single agent has spoken.
+#
+# --system rather than --global, and that is the whole point of putting it here:
+# SubprocessSandboxExecutor builds each child's environment from scratch and
+# repoints HOME at the workspace, so a ~/.gitconfig belonging to `app` is simply
+# not read by the git that a tool invokes. /etc/gitconfig is read whatever HOME
+# says, which makes it the only file that covers both the orchestrator's own git
+# calls and git run from inside the sandbox. It is also why this cannot live in
+# the entrypoint: that already runs as `app` and cannot write /etc.
+#
+# Scoped to the one path, not `*`: the mount point is fixed by the compose file,
+# so there is no reason to disarm the check for every directory in the image.
+RUN git config --system --add safe.directory /projects/current
 
 # Unprivileged account: the control plane never needs root, and agent-produced
 # code must never be one misconfiguration away from it.

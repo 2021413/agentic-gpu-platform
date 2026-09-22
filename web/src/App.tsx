@@ -20,7 +20,8 @@ import {
 import { useRunStream } from "./useRunStream";
 import { Candidates } from "./components/Candidates";
 import { ContextTree } from "./components/ContextTree";
-import { Fleet } from "./components/Fleet";
+import { Fleet, freeSlots, isLive } from "./components/Fleet";
+import { StartHere } from "./components/StartHere";
 import { Timeline } from "./components/Timeline";
 
 const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
@@ -130,14 +131,32 @@ export default function App() {
   };
 
   const tokens = run ? run.input_tokens + run.output_tokens : 0;
+  const selected = useMemo(
+    () => projects.find((p) => p.id === projectId) ?? null,
+    [projects, projectId],
+  );
+
+  /*
+   * The top bar reports what the fleet can do, not how many rows the workers
+   * endpoint returned. "2 workers" over one READY and one OFFLINE machine is
+   * the precise shape of the lie this viewer exists to refuse, so the badge
+   * counts the live ones and turns amber the moment a registered worker is not
+   * among them.
+   */
+  const live = workers.filter(isLive).length;
+  const fleetTone =
+    workers.length === 0 || live === 0 ? "bad" : live < workers.length ? "warn" : "ok";
 
   return (
     <div className="app">
       <header className="top">
         <h1>Agentic control plane</h1>
         <div className="top-right">
-          <span className={`badge ${workers.length ? "ok" : "bad"}`}>
-            {workers.length} worker{workers.length === 1 ? "" : "s"}
+          <span
+            className={`badge ${fleetTone}`}
+            title={`${freeSlots(workers)} free slot(s) across ${live} live worker(s)`}
+          >
+            {live}/{workers.length} live
           </span>
         </div>
       </header>
@@ -153,6 +172,10 @@ export default function App() {
           <section className="panel">
             <header className="panel-head">
               <h3>Projects</h3>
+              {/* Not a badge: a badge means a state worth reacting to, and this
+                  is only how many rows the scroller holds. It is here so that a
+                  list cut off at five reads as five of twelve. */}
+              <span className="count">{projects.length}</span>
             </header>
             <ul className="list">
               {projects.map((project) => (
@@ -211,7 +234,7 @@ export default function App() {
         </aside>
 
         <main className="main">
-          {!run && <p className="muted pad">Pick a run on the left, or start one, to watch it here.</p>}
+          {!run && <StartHere projects={projects} workers={workers} project={selected} />}
 
           {run && (
             <>

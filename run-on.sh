@@ -108,6 +108,12 @@ test=${TEST-$test}
 # project whose `pytest` is equally absent. So ask, rather than assume — a
 # command that cannot start is reported as a tool failure and kills the run
 # with a reason that says nothing about the code.
+#
+# The api container is the right thing to probe, despite TOOL_SANDBOX_IMAGE
+# suggesting otherwise: with ENVIRONMENT=local the composition root builds a
+# SubprocessSandboxExecutor, and a tool command is then a child process of this
+# very container. That image name only starts meaning something once a run is
+# not local and the Docker executor is composed instead.
 missing=""
 for cmd in "$build" "$test"; do
     [ -n "$cmd" ] || continue
@@ -122,8 +128,9 @@ if [ -n "$missing" ]; then
     echo "    Every candidate would fail on that, for a reason that has nothing"
     echo "    to do with the code the agents write."
     echo
-    echo "    Either install them in the image the tools use, or drop the"
-    echo "    command so validation is recorded as SKIPPED instead of failed."
+    echo "    Either install them in docker/api.Dockerfile and rebuild"
+    echo "    (docker compose up -d --build api), or drop the command so that"
+    echo "    validation is recorded as SKIPPED instead of failed."
     echo
     if [ "${STRICT_TOOLS:-1}" = "1" ]; then
         die "refusing to spend a run on a toolchain that cannot execute.

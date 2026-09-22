@@ -168,7 +168,7 @@ body {
 }
 
 .muted { color: var(--text-dim); }
-.pad { padding: var(--s7) var(--s4); text-align: center; color: var(--text-dim); }
+.small { font-size: 12px; }
 
 /* ── status vocabulary ───────────────────────────────────────────────── */
 /*
@@ -222,17 +222,51 @@ body {
 }
 .badge.ok  { color: var(--ok);  border-color: color-mix(in srgb, var(--ok) 30%, var(--line)); }
 .badge.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }
+/* Amber is the state between "the fleet is whole" and "there is no fleet": some
+   registered worker is not answering. Without it the badge has to round a
+   half-dead fleet to one of the two, and it always rounded up. */
+.badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--line)); }
+
+/* A count, not a badge. No border and no tint, because it reports a quantity
+   rather than a state and must not compete with the things that do. */
+.count {
+  font: 500 11px/1 var(--mono);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
 
 /* ── lists ───────────────────────────────────────────────────────────── */
-.list { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; }
+/*
+ * The scroller is measured in rows, not in pixels. Every row is the same height
+ * — 8px of padding, a 20px name, a 3px gap and an 18px detail line — so capping
+ * the box at four and a half of them puts the cut in that 3px gap: the fifth
+ * row shows its name whole and loses its detail line, which reads as a row that
+ * continues. A round `max-height: 300px` cut wherever it landed, and landing
+ * through the middle of a word reads as a rendering fault rather than as an
+ * invitation to scroll. The count in the panel header says how many rows are
+ * below the fold; that and the half row are the whole affordance, since the
+ * gradient that would usually be used here is forbidden and would only be
+ * hiding the same bad cut behind a fade.
+ */
+.list {
+  list-style: none; margin: 0; padding: 0;
+  --row: 57px;
+  max-height: calc(var(--row) * 4.5);
+  overflow-y: auto;
+  /* Scrolling settles on a row edge, so the cut keeps falling where it was
+     designed to fall instead of wherever the wheel stopped. */
+  scroll-snap-type: y proximity;
+}
 
 .list li {
+  min-height: var(--row);
   padding: var(--s2) var(--s2) var(--s2) var(--s3);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  display: flex; flex-direction: column; gap: 3px;
+  display: flex; flex-direction: column; justify-content: center; gap: 3px;
   position: relative;
   border-left: 2px solid transparent;
+  scroll-snap-align: start;
 }
 .list li:hover { background: var(--raised); }
 .list li.active {
@@ -241,7 +275,17 @@ body {
 }
 .list li.muted { cursor: default; border-left-color: transparent; }
 .list li.muted:hover { background: none; }
-.list strong { font-weight: 600; font-size: 13px; }
+/* A chip is as wide as its word. Without this the column's stretch makes a run's
+   status a full-bleed bar, which reads as an alert banner rather than as the
+   label on a row — and the taller rows above made it louder still. */
+.list .pill { align-self: flex-start; }
+
+/* One line, always: a name that wrapped would make its row taller than the rest
+   and move the cut off the gap it was aimed at. */
+.list strong {
+  font-weight: 600; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .list small {
   color: var(--text-dim);
   font-size: 11.5px;
@@ -393,13 +437,72 @@ input:focus, select:focus {
 }
 .roles { color: var(--text-faint); }
 
-/* A meter, not a progress bar: it reports a level, it does not promise an end. */
-.load { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
-.load > span {
-  display: block; height: 100%;
-  background: var(--accent);
-  transition: width 240ms ease;
+/*
+ * A worker that stopped answering is demoted the way a rejected candidate is —
+ * the same opacity, because this interface should have one way of saying "still
+ * here, no longer load-bearing" rather than one per panel. The structural half
+ * of the demotion is in the markup: no window, no capacity, no meter, because
+ * none of those are true of it any more.
+ */
+.workers li.gone { opacity: 0.62; }
+
+/*
+ * A meter, not a progress bar: it reports a level, it does not promise an end.
+ * One cell per slot, separated by gaps, so an idle worker shows four empty
+ * cells instead of the full-width hairline the old continuous track drew at 0%
+ * — which sat between two workers at exactly the weight and colour of the rules
+ * used as separators elsewhere, and was read as one.
+ */
+.load { display: flex; gap: 2px; height: 4px; }
+.load > .slot {
+  flex: 1; min-width: 2px;
+  background: var(--line);
+  border-radius: 1px;
+  transition: background 240ms ease;
 }
+.load > .slot.on { background: var(--accent); }
+
+/* ── the unselected column ───────────────────────────────────────────── */
+/* A heading inside a panel, one step below `.panel-head` and carrying its own
+   hairline, so a panel can hold two subjects without becoming two panels. */
+.sub {
+  margin: var(--s4) 0 var(--s2);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line-soft);
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.steps { margin: 0; padding-left: 20px; color: var(--text-dim); font-size: 12.5px; }
+.steps li { padding: 2px 0; }
+.steps li::marker { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+
+/* Labels in a fixed track and values in the other, so the commands line up in a
+   column the eye can run down — the alignment doing what a table's rules
+   would. */
+.kv { margin: 0; display: grid; gap: 2px; }
+.kv-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: var(--s3);
+  align-items: baseline;
+}
+.kv dt {
+  font: 500 10px/1.7 var(--mono);
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+.kv dd {
+  margin: 0;
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+/* "not set" is a fact about the project, not a value, and must not be mistaken
+   for a command at a glance. */
+.kv dd.unset { color: var(--text-faint); }
 
 /* ── candidates ──────────────────────────────────────────────────────── */
 .candidate {
