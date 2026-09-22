@@ -156,7 +156,7 @@ hour, `unauthenticated=True` in prod, and GPU snapshots without CPU snapshots.
 
 ## Cost
 
-H100 SXM at **$0.001097/second**, about $3.95/hour. Volume storage at
+H100 SXM at **$0.001097/second**, about $3.95/hour (confirmed by `modal billing rates`; an H200 is $4.54/hour and costs the same as an H100 when Modal substitutes one). Volume storage at
 $0.09/GiB/month, so 40 GiB of weights and caches is roughly $3.60/month — about
 fifty-five minutes of H100 time, which is why the Volume is never the thing to
 economise on.
@@ -239,13 +239,78 @@ modal volume get agentic-gpu-cache /logs/startup.jsonl -
 
 ---
 
+## Measured, 22 September 2026
+
+One workspace, one H100 (`nvidia-h100-80gb-hbm3`), `Qwen3-Coder-30B-A3B-Instruct-FP8`
+at 16384 context. These are readings, not estimates; the breakdown comes from
+the `StartupRecord` each container writes to `/data/logs/startup.jsonl` and from
+vLLM's own log lines.
+
+| | first boot | after both fixes |
+|---|---|---|
+| volume reload | 0.18 s | 0.18 s |
+| model resolve (marker + verify) | 0.53 s | 0.53 s |
+| vLLM launch (fork) | 0.002 s | 0.002 s |
+| weight load | **338.1 s** (82 s/shard) | **54.2 s** (7.7 s/shard) |
+| init engine | 215.4 s (compile 52.6 s) | 56.7 s (compile 6.1 s) |
+| **readiness, total** | **643 s — $0.71** | **178 s — $0.19** |
+| warm completion (16 tokens) | — | 3.5 – 4.0 s |
+
+Everything outside vLLM comes to **0.7 seconds**. That is the whole argument for
+splitting the measurement: a single `cold_start_seconds` of 643 would have sent
+somebody looking at Modal's scheduler, the Volume, or the image, and all three
+were already fast.
+
+Two changes account for the difference, and the logs attribute them:
+
+* **`--safetensors-load-strategy=prefetch` — about −284 s.** A Modal Volume is
+  mounted over 9P and vLLM does not recognise that as a network filesystem, so
+  it turns its own read-ahead off and loads the four shards serially. It says so
+  in the log, and naming the strategy is what that message asks for.
+* **A warm compile cache on the Volume — about −159 s.** Keyed by the GPU
+  actually attached, so an H200 substitution cannot silently reuse an H100's
+  graphs.
+
+**The wiring, end to end.** Not curl: the control plane's own
+`OpenAICompatibleLLMProvider`, built from the same `Settings` the orchestrator
+uses, against an empty pool.
+
+```text
+scale_to_zero             = True
+cold_start_max_wait       = 900.0s
+health() on an empty pool = True      <- or the registry evicts the only worker
+completing through the adapter, pool empty...
+waited 220s, cost ~$0.24 of H100
+finish_reason = stop
+usage         = TokenUsage(input_tokens=28, output_tokens=16)
+```
+
+The 503s were waited out inside the adapter. No job failed, nothing was
+requeued, and the completion that paid for the cold start is the one that got
+the answer.
+
+Other measurements worth keeping:
+
+* **Populating the Volume: 31.2 GB in 76 seconds**, on a CPU container, for
+  about one cent. Doing the same download on the H100 would cost roughly $0.08
+  in GPU time alone — and forty times that if it happened on every cold start.
+* **A refusal costs 0.6 – 1.4 s.** A container that finds no prepared model dies
+  in about a second. Modal retried it three times for one request: four seconds
+  of H100 in total, against the forty minutes an accidental download would have
+  billed.
+* **`max_containers=1` holds.** Twenty `/health` polls against an empty pool,
+  every one answered 503, produced exactly one container.
+* **Redeploying a code change takes 15 seconds**, against 240 for the first
+  deploy that had to pull and build the image.
+
 ## What is still unproven
 
-Nothing in this document has run against a real Modal account. The code is
-type-checked, linted and covered by 361 offline tests; the API shapes were taken
-from Modal's current documentation rather than from memory. But no container has
-started, no weight has been downloaded, and no cold start has been measured.
-
-Until `modal run infra/modal/app.py` has printed a URL and
-`scripts/benchmark_cold_start.py` has produced numbers, treat every timing in
-this file as an expectation, not a measurement.
+* No cold start has been measured against a *cold* compile cache **with**
+  prefetch on, so the two savings above are attributed from vLLM's own timings
+  rather than isolated experimentally.
+* `scripts/benchmark_cold_start.py` and `scripts/benchmark_scaledown.py` have
+  not been run. `scaledown_window` is still 60 s in dev and 120 s in prod
+  because those were reasonable starting points, not because anything measured
+  them against a real day's request pattern.
+* Nothing has run under concurrent load. `target_concurrency` is unset, so one
+  container serves one request at a time.
