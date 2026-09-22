@@ -271,6 +271,25 @@ Two changes account for the difference, and the logs attribute them:
   actually attached, so an H200 substitution cannot silently reuse an H100's
   graphs.
 
+**Third cold start, compile cache fully warm** — `scripts/benchmark_cold_start.py --cold 1 --warm 2`:
+
+```text
+cold  1/1   capacity 138.0s   first token 138.0s   total 139.0s
+warm  1/2                     first token   0.7s   total   1.0s
+warm  2/2                     first token   0.3s   total   0.9s
+
+container: volume reload    0.1s
+container: model resolve    0.1s
+container: vllm launch      0.0s
+container: readiness      129.3s
+container: total startup  129.6s
+
+cost of one cold request at H100 rates: $0.152 (139 GPU-seconds)
+```
+
+So the arc is 643s → 178s → **129.6s**, and $0.71 → $0.19 → **$0.15**. A warm
+request answers its first token in **0.3–0.7 s**.
+
 **The wiring, end to end.** Not curl: the control plane's own
 `OpenAICompatibleLLMProvider`, built from the same `Settings` the orchestrator
 uses, against an empty pool.

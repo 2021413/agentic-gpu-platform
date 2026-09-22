@@ -38,13 +38,11 @@ import argparse
 import json
 import os
 import statistics
-import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from datetime import UTC, datetime
 
 import httpx
 import modal
@@ -55,6 +53,8 @@ H100_DOLLARS_PER_SECOND = 0.001097
 # Modal's proxy answers this when the pool is empty; it means "booting".
 SERVICE_UNAVAILABLE = 503
 BAD_REQUEST = 400
+# Above this, the request waited for a container rather than for tokens.
+WARM_THRESHOLD_S = 5.0
 
 
 @dataclass
@@ -106,6 +106,11 @@ def summarise(name: str, values: Sequence[float], *, unit: str = "s") -> Summary
         maximum=ordered[-1],
         samples=list(ordered),
     )
+
+
+def _seconds(value: float | None) -> str:
+    """A missing measurement says so, instead of printing `nan`."""
+    return f"{value:6.1f}s" if value is not None else "      -"
 
 
 def render(summary: Summary) -> str:
@@ -188,9 +193,19 @@ def complete_once(
                     detail="" if first_token else "stream carried no content",
                 )
         except httpx.HTTPError as exc:
+            # A booting Server drops the connection as readily as it answers
+            # 503: the proxy accepts the request, finds no container ready and
+            # hangs up. Treating that as a failed attempt mislabelled the cold
+            # start as a failure and then billed the *next* request for it —
+            # which is exactly the accounting mistake this script exists to
+            # measure. Before the deadline it means the same thing as a 503.
+            if time.monotonic() < deadline:
+                became_available = None
+                time.sleep(2.0)
+                continue
             return Attempt(
-                cold=False,
-                waited_for_capacity_s=0.0,
+                cold=True,
+                waited_for_capacity_s=time.monotonic() - began,
                 first_token_s=None,
                 total_s=time.monotonic() - began,
                 ok=False,
@@ -221,35 +236,34 @@ def drain_to_zero(server: modal.Server, client: httpx.Client, *, timeout: float)
 
 
 # -- container-side records ---------------------------------------------
-def container_records(volume_name: str, since_epoch: float) -> list[dict[str, object]]:
+def container_records(volume_name: str, since_iso: str) -> list[dict[str, object]]:
     """Startup breakdowns written by the containers this run started.
 
-    Read from the Volume rather than from logs: a log line is a string someone
-    has to parse, and this is the same JSON the container wrote.
+    Read from the Volume through the SDK rather than by shelling out to
+    `modal volume get`: the client is a library here, and the binary is only on
+    PATH when the venv happens to be activated. It was not, and a run that had
+    already spent its GPU money died on `FileNotFoundError: 'modal'` at the last
+    step — after the measurements, before printing them.
     """
-    with tempfile.TemporaryDirectory() as workdir:
-        target = Path(workdir) / "startup.jsonl"
-        completed = subprocess.run(
-            ["modal", "volume", "get", volume_name, "/logs/startup.jsonl", str(target)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0 or not target.is_file():
-            print(f"  (no startup records: {completed.stderr.strip()[:200]})")
-            return []
-        records = []
-        for line in target.read_text(encoding="utf-8").splitlines():
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    volume = modal.Volume.from_name(volume_name)
+    try:
+        raw = b"".join(volume.read_file("/logs/startup.jsonl"))
+    except Exception as exc:
+        print(f"  (no startup records: {type(exc).__name__}: {exc})")
+        return []
+    records: list[dict[str, object]] = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # Only this run's boots. `started_at` is ISO-8601 UTC, so a string
+        # comparison is a date comparison.
+        if isinstance(entry, dict) and str(entry.get("started_at", "")) >= since_iso:
             records.append(entry)
-    # `started_at` is ISO-8601 UTC; comparing strings would be fragile across
-    # the boundary, so anything written after the run began is close enough:
-    # the benchmark is the only thing starting containers.
-    return records[-64:] if since_epoch else records
-
+    return records
 
 
 def collect(
@@ -282,7 +296,7 @@ def collect(
                 print(
                     f"cold {index + 1:>2}/{args.cold}  drained in {drained:5.0f}s  "
                     f"capacity {attempt.waited_for_capacity_s:6.1f}s  "
-                    f"first token {attempt.first_token_s or float('nan'):6.1f}s  "
+                    f"first token {_seconds(attempt.first_token_s)}  "
                     f"total {attempt.total_s:6.1f}s  {attempt.detail}"
                 )
             for index in range(args.warm):
@@ -293,10 +307,15 @@ def collect(
                     max_tokens=args.max_tokens,
                     capacity_timeout=args.capacity_timeout,
                 )
+                # Relabel honestly: the previous iteration may have failed
+                # while the container was still coming up, in which case this
+                # "warm" request is the one that paid for the cold start.
+                if attempt.waited_for_capacity_s > WARM_THRESHOLD_S:
+                    attempt.cold = True
                 attempts.append(attempt)
                 print(
-                    f"warm {index + 1:>2}/{args.warm}  "
-                    f"first token {attempt.first_token_s or float('nan'):6.1f}s  "
+                    f"{'cold' if attempt.cold else 'warm'} {index + 1:>2}/{args.warm}  "
+                    f"first token {_seconds(attempt.first_token_s)}  "
                     f"total {attempt.total_s:6.1f}s  {attempt.detail}"
                 )
         finally:
@@ -330,7 +349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     url = server.get_url()
     print(f"server: {url}\ncold: {args.cold}  warm: {args.warm}\n")
 
-    began_epoch = time.time()
+    began_iso = datetime.now(UTC).isoformat(timespec="seconds")
     attempts = collect(server, url, headers, args)
 
     cold = [a for a in attempts if a.cold and a.ok]
@@ -345,7 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         summarise("warm: full completion", [a.total_s for a in warm]),
     ]
 
-    records = container_records(args.volume, began_epoch)
+    records = container_records(args.volume, began_iso)
     for field_name, label in (
         ("volume_reload_ms", "container: volume reload"),
         ("model_resolve_ms", "container: model resolve"),
