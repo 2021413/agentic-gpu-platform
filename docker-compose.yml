@@ -88,6 +88,14 @@ services:
       # chosen here. The default stack has no GPU; switch to openai_compatible
       # when enabling the `gpu` profile.
       LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      # The bearer the engines demand, if they demand one. Wired in code and
+      # not here was a 401 on every inference: the setting existed, the
+      # container never saw it.
+      INFERENCE_API_KEY: ${INFERENCE_API_KEY:-}
+      RESERVED_OUTPUT_TOKENS: ${RESERVED_OUTPUT_TOKENS:-4096}
+      REQUIRE_APPROVAL: ${REQUIRE_APPROVAL:-false}
+      TOOL_SANDBOX_IMAGE: ${TOOL_SANDBOX_IMAGE:-python:3.12-slim}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
       MAX_PLAN_REVISIONS: ${MAX_PLAN_REVISIONS:-2}
       MAX_CODER_ITERATIONS: ${MAX_CODER_ITERATIONS:-4}
       MAX_REPAIR_ITERATIONS: ${MAX_REPAIR_ITERATIONS:-3}

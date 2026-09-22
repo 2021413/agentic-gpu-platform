@@ -14,3 +14,35 @@ services:
   api:
     volumes:
       - ${LOCAL_PROJECT_PATH:?set LOCAL_PROJECT_PATH in .env}:/projects/current:rw
+
+  # A worker agent for an inference server that lives somewhere else — a
+  # RunPod pod reached over its TCP endpoint, say. The agent runs here, next
+  # to the control plane; only the model is remote.
+  #
+  # MODEL_ID and MODEL_CONTEXT_LENGTH below are deliberately not what the pod
+  # serves: the pod is started with SERVED_MODEL_NAME=qwen3-coder and
+  # MAX_MODEL_LEN=32768. The agent must reconcile both against /v1/models, or
+  # the control plane sends a name vLLM answers 404 to and advertises sixteen
+  # times the context window it has.
+  worker-remote:
+    profiles: ["remote"]
+    image: agentic-api:dev
+    restart: "no"
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["agentic-worker"]
+    environment:
+      CONTROL_PLANE_URL: http://api:8000
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token-change-me}
+      LLM_PROVIDER: openai_compatible
+      INFERENCE_BASE_URL: ${REMOTE_INFERENCE_URL:?set REMOTE_INFERENCE_URL}
+      INFERENCE_API_KEY: ${INFERENCE_API_KEY:-}
+      WORKER_ENDPOINT: ${REMOTE_INFERENCE_URL}
+      MODEL_ID: ${MODEL_ID:-Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8}
+      MODEL_CONTEXT_LENGTH: ${MODEL_CONTEXT_LENGTH:-131072}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      WORKER_ROLES: PLANNER,CODER,REVIEWER
+      HEARTBEAT_INTERVAL_SECONDS: "10"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: console
