@@ -82,7 +82,7 @@ from domain.value_objects.validation import ValidationReport
 from domain.value_objects.worker import JobRequirements
 from domain.value_objects.workspace import WorkspaceHandle, WorkspaceRole
 
-__all__ = ["OrchestratorConfig", "RunOrchestrator"]
+__all__ = ["OrchestratorConfig", "RunOrchestrator", "diagnose_broken_module"]
 
 _log = logging.getLogger(__name__)
 
@@ -1273,6 +1273,63 @@ def accumulated_repair_brief(reviews: Sequence[Review]) -> str | None:
     )
 
 
+# Pytest says these when a test module could not be imported at all. They are
+# not failing tests: nothing ran. The distinction matters because the two need
+# opposite reactions from the coder, and the output looks similar enough that a
+# model reading a truncated traceback treats them the same.
+_COLLECTION_FAILURES: tuple[str, ...] = (
+    "ERROR collecting",
+    "ImportError while importing test module",
+    "errors during collection",
+    "INTERNALERROR",
+)
+
+# The exception families that mean the file itself is broken rather than wrong.
+_IMPORT_TIME_ERRORS: tuple[str, ...] = (
+    "SyntaxError",
+    "IndentationError",
+    "ModuleNotFoundError",
+    "ImportError",
+    "NameError",
+    "AttributeError",
+    "PydanticUserError",
+)
+
+
+def diagnose_broken_module(output: str) -> str | None:
+    """Say plainly when the code no longer loads, rather than leaving it in a trace.
+
+    A real run died here. The coder was asked for a ten-line validator in a
+    357-line module, wrote the four correct lines, and then rewrote an
+    unrelated class from memory — dropping fields that existed and adding a
+    decorator referencing one it had not declared. The module stopped
+    importing, so every test failed at collection, and all three repair rounds
+    received the same traceback and rewrote the same whole file again.
+
+    Nothing in that output said "you broke the file". It said `PydanticUserError`
+    at the end of twenty frames of pytest internals, under a heading that reads
+    like a test failure. This turns it into a sentence, at the top, where a
+    model that skims will still see it.
+
+    ``None`` when the output is an ordinary failure, because a warning that
+    fires on everything is a warning nobody reads.
+    """
+    if not output:
+        return None
+    collecting = any(marker in output for marker in _COLLECTION_FAILURES)
+    import_time = any(error in output for error in _IMPORT_TIME_ERRORS)
+    if not (collecting and import_time):
+        return None
+    return (
+        "THE CODE NO LONGER LOADS. This is not a failing test: nothing ran at "
+        "all, because importing the module raised. Every other failure below is "
+        "a consequence of this one and will disappear when it does.\n"
+        "Repair the file you last edited before changing anything else, and "
+        "check whether you rewrote code you were not asked to touch — a class "
+        "or function that has lost members it used to have is the usual cause."
+    )
+
+
 def _recent_tool_evidence(results: Sequence[ToolResult], *, limit: int = 3) -> str:
     """What the deterministic tools said, for the agent that can act on it.
 
@@ -1287,7 +1344,9 @@ def _recent_tool_evidence(results: Sequence[ToolResult], *, limit: int = 3) -> s
     """
     failures = [r for r in reversed(results) if not r.succeeded]
     chosen = failures[:limit] or list(reversed(results))[:1]
-    return "\n\n".join(f"$ {r.command}\nexit={r.exit_code}\n{r.tail(2000)}" for r in chosen)
+    evidence = "\n\n".join(f"$ {r.command}\nexit={r.exit_code}\n{r.tail(2000)}" for r in chosen)
+    diagnosis = diagnose_broken_module(evidence)
+    return f"{diagnosis}\n\n{evidence}" if diagnosis else evidence
 
 
 def _classify(exc: Exception) -> FailureKind:
