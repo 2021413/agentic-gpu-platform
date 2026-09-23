@@ -54,6 +54,19 @@ class RetryPolicy:
     max_attempts: int = 3
     base_delay: timedelta = timedelta(seconds=1)
     max_delay: timedelta = timedelta(seconds=30)
+    no_worker_delay: timedelta = timedelta(seconds=45)
+    """How long to wait before asking an empty fleet again.
+
+    Not the exponential backoff, which starts at a second: a serverless GPU
+    takes on the order of two minutes to boot, measured, so three attempts
+    spaced one and two seconds apart cannot outlast a fleet that is starting
+    one. This is flat rather than growing because the thing being waited for
+    has a roughly fixed duration — a cold start — and not an unknown one.
+
+    Sized under the heartbeat timeout on purpose: a worker that comes up
+    announces itself within that window, so waiting longer than it buys
+    nothing but an idle job.
+    """
     max_structured_output_repairs: int = 2
 
     def __post_init__(self) -> None:
@@ -102,6 +115,12 @@ class RetryPolicy:
         if attempt >= self.max_attempts:
             return RetryDecision(RetryAction.FAIL, reason="retry budget exhausted")
 
+        if kind is FailureKind.NO_WORKER:
+            return RetryDecision(
+                RetryAction.RETRY_OTHER_WORKER,
+                delay=self.no_worker_delay,
+                reason="no worker could take the job; waiting for one to appear",
+            )
         if kind is FailureKind.INFRASTRUCTURE:
             return RetryDecision(
                 RetryAction.RETRY_OTHER_WORKER,

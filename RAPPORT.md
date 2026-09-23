@@ -271,14 +271,23 @@ un job dû n'appartient à aucun ensemble. Les deux adaptateurs sont tenus par l
 même suite de contrat, et elle a d'ailleurs attrapé un désaccord entre eux
 avant que je le voie.
 
-Ce qui **reste** : la grandeur du délai. La politique produit 1 s puis 2 s sur
-un échec d'infrastructure, et trois tentatives espacées ainsi ne survivent pas
-à un démarrage à froid de **130 s** — chiffre mesuré, pas estimé. Honorer le
-délai était nécessaire ; ce n'est pas suffisant. La bonne correction est
-probablement de distinguer « aucun worker compatible » des autres échecs
-d'infrastructure, parce que c'est le seul pour lequel la seule chose qui puisse
-changer est le temps, et de caler son attente sur le coût d'un démarrage à
-froid plutôt que sur une exponentielle qui part d'une seconde. Non fait.
+**La grandeur du délai aussi.** La politique produisait 1 s puis 2 s sur un
+échec d'infrastructure, et trois tentatives espacées ainsi ne survivent pas à un
+démarrage à froid de **130 s** — chiffre mesuré. « Aucun worker compatible » est
+désormais un `FailureKind` à part entière : c'est le seul échec pour lequel la
+seule chose qui puisse changer est le temps. Un bail expiré ou une connexion
+refusée peuvent très bien réussir immédiatement ailleurs ; un pool vide répond
+la même chose quelle que soit la vitesse à laquelle on l'interroge.
+
+L'attente est **plate** (45 s) et non exponentielle, parce que ce qu'on attend a
+une durée à peu près fixe — un démarrage à froid — et non inconnue. Elle est
+calée sous le délai de heartbeat : un worker qui se lève s'annonce dans cette
+fenêtre, donc attendre davantage n'achète qu'un job oisif. Le budget reste
+borné : une flotte qui ne revient jamais fait échouer le run au lieu de le
+tenir ouvert indéfiniment.
+
+Ce qui **reste** : rien de connu sur ce point. Il n'a pas été rejoué contre un
+vrai démarrage à froid — les tests le tiennent, la H100 pas encore.
 
 ---
 

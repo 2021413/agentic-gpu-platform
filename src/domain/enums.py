@@ -220,6 +220,18 @@ class FailureKind(StrEnum):
     INFRASTRUCTURE = "INFRASTRUCTURE"
     """Worker vanished, lease expired, connection refused, queue error."""
 
+    NO_WORKER = "NO_WORKER"
+    """Nothing in the fleet could take this job.
+
+    Split out of INFRASTRUCTURE because it is the one failure where retrying
+    changes nothing unless time passes. A lease that expired or a connection
+    that was refused may well succeed on the next attempt against a different
+    worker; an empty pool answers the same way however fast you ask it. With
+    scale-to-zero a fleet of one GPU is the ordinary case, and a job that
+    retried immediately spent all three of its attempts in four seconds while
+    the only worker was still booting.
+    """
+
     INFERENCE = "INFERENCE"
     """The model call itself failed: timeout, context overflow, server error."""
 
@@ -245,7 +257,12 @@ class FailureKind(StrEnum):
     @property
     def is_infrastructure(self) -> bool:
         """Failures of the machinery rather than of the produced code."""
-        return self in (FailureKind.INFRASTRUCTURE, FailureKind.INFERENCE, FailureKind.TOOL)
+        return self in (
+            FailureKind.INFRASTRUCTURE,
+            FailureKind.NO_WORKER,
+            FailureKind.INFERENCE,
+            FailureKind.TOOL,
+        )
 
     @property
     def is_code_defect(self) -> bool:

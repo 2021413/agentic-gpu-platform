@@ -61,3 +61,46 @@ def test_backoff_grows_and_is_capped() -> None:
     assert policy.backoff(1) == timedelta(seconds=1)
     assert policy.backoff(2) == timedelta(seconds=2)
     assert policy.backoff(9) == timedelta(seconds=4)
+
+
+# -- an empty fleet is not a transport failure -----------------------------
+def test_an_empty_fleet_waits_long_enough_for_a_worker_to_boot(
+    policy: RetryPolicy,
+) -> None:
+    """A serverless GPU takes on the order of two minutes to come up, measured.
+    Three attempts one and two seconds apart cannot outlast that, which is how
+    a real run died while its only worker was still loading."""
+    decision = policy.decide(kind=FailureKind.NO_WORKER, attempt=1)
+
+    assert decision.action is RetryAction.RETRY_OTHER_WORKER
+    assert decision.delay >= timedelta(seconds=30)
+
+
+def test_the_wait_for_a_worker_does_not_grow(policy: RetryPolicy) -> None:
+    """Flat, not exponential: what is being waited for is a cold start, which
+    takes roughly the same time each attempt rather than an unknown time."""
+    first = policy.decide(kind=FailureKind.NO_WORKER, attempt=1).delay
+    second = policy.decide(kind=FailureKind.NO_WORKER, attempt=2).delay
+
+    assert first == second
+
+
+def test_a_transport_failure_is_still_retried_promptly(policy: RetryPolicy) -> None:
+    """The long wait must not leak into the other infrastructure failures: a
+    lapsed lease or a refused connection may well succeed at once elsewhere."""
+    prompt = policy.decide(kind=FailureKind.INFRASTRUCTURE, attempt=1)
+
+    assert prompt.delay < policy.decide(kind=FailureKind.NO_WORKER, attempt=1).delay
+
+
+def test_an_empty_fleet_still_runs_out_of_attempts(policy: RetryPolicy) -> None:
+    """Waiting is bounded. A fleet that never comes back must fail the run
+    rather than hold it open indefinitely."""
+    assert policy.decide(kind=FailureKind.NO_WORKER, attempt=3).action is RetryAction.FAIL
+
+
+def test_waiting_for_a_worker_counts_as_an_infrastructure_failure() -> None:
+    """It is split out for its retry timing, not reclassified: everything that
+    branches on `is_infrastructure` must keep treating it the same way."""
+    assert FailureKind.NO_WORKER.is_infrastructure
+    assert not FailureKind.NO_WORKER.is_code_defect

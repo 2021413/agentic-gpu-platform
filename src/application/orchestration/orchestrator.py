@@ -1205,7 +1205,7 @@ _FAILURE_KINDS: Final[tuple[tuple[type[Exception], FailureKind], ...]] = (
     (StructuredOutputError, FailureKind.INVALID_STRUCTURED_OUTPUT),
     (LLMTimeoutError, FailureKind.INFERENCE),
     (InferenceError, FailureKind.INFERENCE),
-    (NoCompatibleWorkerError, FailureKind.INFRASTRUCTURE),
+    (NoCompatibleWorkerError, FailureKind.NO_WORKER),
     (ToolExecutionError, FailureKind.TOOL),
     (WorkspaceError, FailureKind.INFRASTRUCTURE),
 )
