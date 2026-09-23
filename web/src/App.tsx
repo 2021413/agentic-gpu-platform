@@ -31,7 +31,7 @@ const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
  * under its maximum of 200, so a project with a long history costs several
  * small reads rather than one large one that still might not be the end.
  */
-const RUNS_PAGE = 2;
+const RUNS_PAGE = 50;
 
 /**
  * Fold a freshly read first page into the runs already on screen.
@@ -97,7 +97,15 @@ export default function App() {
     };
   }, [projectId]);
 
-  /** Ask for the page after the runs already held, and note when it is the last. */
+  /*
+   * Ask for the page after the runs already held, and note when it is the last.
+   *
+   * The offset is counted from what is on screen, which is what offset paging
+   * over a newest-first list can do: a run created between two pages shifts
+   * every older row down by one, and the row that lands on the seam is read
+   * twice. The duplicate is dropped by id below; there is no cursor on this
+   * endpoint that would avoid the shift altogether.
+   */
   const loadOlderRuns = async () => {
     if (!projectId) return;
     setLoadingRuns(true);
