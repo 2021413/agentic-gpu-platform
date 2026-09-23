@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from application.ports import MetricsExposition
 from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
@@ -79,5 +80,7 @@ class ApiDependencies:
     deregister_worker: DeregisterWorkerUseCase
     # ports and probes
     event_bus: EventBus
+    metrics: MetricsExposition | None
+    """The registry the exposition renders, or None when disabled."""
     readiness: ReadinessProbe
     service_authenticator: ServiceAuthenticator

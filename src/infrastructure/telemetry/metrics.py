@@ -25,6 +25,7 @@ __all__ = [
     "METRICS_CONTENT_TYPE",
     "NullMetricsRecorder",
     "PlatformMetrics",
+    "PrometheusExposition",
     "PrometheusMetricsRecorder",
     "render_metrics",
 ]
@@ -176,6 +177,22 @@ class NullMetricsRecorder:
     def increment(self, name: str, value: int = 1, **labels: str) -> None: ...
     def observe(self, name: str, value: float, **labels: str) -> None: ...
     def gauge(self, name: str, value: float, **labels: str) -> None: ...
+
+
+class PrometheusExposition:
+    """The `MetricsExposition` port, over one registry."""
+
+    __slots__ = ("_metrics",)
+
+    def __init__(self, metrics: PlatformMetrics) -> None:
+        self._metrics = metrics
+
+    @property
+    def content_type(self) -> str:
+        return METRICS_CONTENT_TYPE
+
+    def render(self) -> bytes:
+        return render_metrics(self._metrics)
 
 
 def render_metrics(metrics: PlatformMetrics) -> bytes:

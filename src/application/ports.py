@@ -23,6 +23,7 @@ from domain.value_objects.llm import ChatMessage
 
 __all__ = [
     "AgentOutputCodec",
+    "MetricsExposition",
     "MetricsRecorder",
     "PromptRenderer",
     "RenderedPrompt",
@@ -107,6 +108,23 @@ class MetricsRecorder(Protocol):
     def increment(self, name: str, value: int = 1, **labels: str) -> None: ...
     def observe(self, name: str, value: float, **labels: str) -> None: ...
     def gauge(self, name: str, value: float, **labels: str) -> None: ...
+
+
+@runtime_checkable
+class MetricsExposition(Protocol):
+    """Renders the current metric values for a scraper.
+
+    A port rather than a direct import because the HTTP layer may not reach
+    into `infrastructure`, and an architecture test enforces it. The content
+    type travels with the payload for the same reason: Prometheus is picky
+    about the exact string, and it belongs to whoever produces the bytes rather
+    than to the route that hands them over.
+    """
+
+    @property
+    def content_type(self) -> str: ...
+
+    def render(self) -> bytes: ...
 
 
 @runtime_checkable

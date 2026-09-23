@@ -52,6 +52,7 @@ def _dependencies(container: Container) -> ApiDependencies:
         drain_worker=container.drain_worker,
         deregister_worker=container.deregister_worker,
         event_bus=container.bus,
+        metrics=container.metrics,
         readiness=PlatformReadinessProbe(engine=container.engine, redis=container.redis),
         service_authenticator=SharedSecretServiceAuthenticator(
             container.settings.service_token.get_secret_value()

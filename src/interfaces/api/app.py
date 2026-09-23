@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from interfaces.api.dependencies.container import ApiDependencies
 from interfaces.api.errors import DEFAULT_PROBLEM_BASE_URI, install_error_handlers
 from interfaces.api.middleware.correlation import RequestContextMiddleware
-from interfaces.api.routes import events, health, projects, runs, workers
+from interfaces.api.routes import events, health, metrics, projects, runs, workers
 from interfaces.worker_api.routes import router as worker_router
 
 __all__ = ["create_api"]
@@ -101,6 +101,7 @@ def create_api(
     install_error_handlers(app, problem_base_uri=problem_base_uri)
 
     app.include_router(health.router)
+    app.include_router(metrics.router)
     app.include_router(projects.router)
     app.include_router(runs.projects_router)
     app.include_router(runs.router)

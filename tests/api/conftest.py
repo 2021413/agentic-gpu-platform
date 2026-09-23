@@ -53,6 +53,7 @@ from domain.entities.run import Run
 from domain.exceptions import EntityNotFoundError
 from domain.services.task_complexity import HeuristicTaskComplexityPolicy
 from domain.value_objects.identifiers import RunId
+from infrastructure.telemetry import PlatformMetrics, PrometheusExposition
 from interfaces.api.app import create_api
 from interfaces.api.dependencies.container import ApiDependencies
 from interfaces.api.dependencies.readiness import DependencyHealth, ReadinessReport
@@ -151,6 +152,10 @@ def harness() -> Harness:
         drain_worker=DrainWorkerUseCase(registry=registry, bus=bus, clock=clock),
         deregister_worker=DeregisterWorkerUseCase(registry=registry, bus=bus, clock=clock),
         event_bus=bus,
+        # A real registry rather than None: the exposition route has two
+        # answers and a suite that only ever sees the disabled one would
+        # not notice the other breaking.
+        metrics=PrometheusExposition(PlatformMetrics.create()),
         readiness=probe,
         service_authenticator=SharedSecretServiceAuthenticator(SERVICE_TOKEN),
     )

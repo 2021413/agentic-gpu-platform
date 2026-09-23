@@ -84,6 +84,12 @@ from infrastructure.queue import (
     RedisJobQueue,
 )
 from infrastructure.redis import RedisEventBus, RedisWorkerRegistry, create_redis_client
+from infrastructure.telemetry import (
+    NullMetricsRecorder,
+    PlatformMetrics,
+    PrometheusExposition,
+    PrometheusMetricsRecorder,
+)
 from infrastructure.tools import RipgrepRepositoryContextProvider, create_sandbox_executor
 from infrastructure.workspace import GitWorktreeWorkspaceManager
 
@@ -98,6 +104,7 @@ class Container:
 
     settings: Settings
     engine: AsyncEngine
+    metrics: PrometheusExposition | None
     redis: Any | None
     clock: SystemClock
     ids: UuidGenerator
@@ -269,6 +276,18 @@ async def build_container(
         heartbeat_timeout=settings.heartbeat_timeout,
         bus=bus,
     )
+    # Declared since day one and instantiated nowhere: no recorder was ever
+    # built, no route ever served the exposition, and METRICS_ENABLED gated
+    # nothing. An unfed Prometheus gauge does not go missing from a scrape, it
+    # reads zero — so a dashboard wired to this would have reported "no active
+    # runs, no registered workers" with the confidence of a measurement.
+    platform_metrics = PlatformMetrics.create() if settings.metrics_enabled else None
+    metrics = (
+        PrometheusMetricsRecorder(platform_metrics)
+        if platform_metrics is not None
+        else NullMetricsRecorder()
+    )
+
     maintenance = MaintenanceLoop(
         queue=queue,
         uow_factory=uow_factory,
@@ -276,12 +295,17 @@ async def build_container(
         clock=clock,
         reaper=reaper,
         orchestrator=orchestrator,
+        registry=registry,
+        metrics=metrics,
         config=MaintenanceConfig(interval=settings.reaper_interval),
     )
 
     return Container(
         settings=settings,
         engine=engine,
+        metrics=(
+            PrometheusExposition(platform_metrics) if platform_metrics else None
+        ),
         redis=redis,
         clock=clock,
         ids=ids,

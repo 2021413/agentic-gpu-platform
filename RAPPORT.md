@@ -383,11 +383,13 @@ gagnerait à ce qu'on le lui dise dans ces termes.
 Trouvé en retirant les ports morts du point 9, et c'est la même promesse non
 tenue une couche au-dessus.
 
-`PlatformMetrics` (`src/infrastructure/telemetry/metrics.py`) déclare
-`active_runs`, `queued_jobs`, `active_jobs`, `registered_workers` et
-`healthy_workers`. **Aucun appel `.gauge(` n'existe nulle part dans `src/`** —
-vérifié par grep, zéro occurrence. Les compteurs et histogrammes, eux, sont
-bien alimentés ; seules les jauges ne le sont pas.
+**Correction de ce que j'ai écrit dix minutes plus tôt dans cette même
+section :** j'avais affirmé que « les compteurs et histogrammes, eux, sont bien
+alimentés ». C'est faux, et le grep le disait déjà. Il y a **zéro** appel à
+`.increment(`, `.observe(` ou `.gauge(` dans tout `src/`. Le problème n'était
+pas les jauges, c'était le sous-système entier : rien n'instanciait
+`PlatformMetrics`, aucune route ne servait l'exposition, et `METRICS_ENABLED`
+ne contrôlait rien du tout.
 
 Ce qui rend le point sérieux plutôt que cosmétique : une jauge Prometheus non
 alimentée n'est pas absente du scrape, elle vaut **zéro**. Un tableau de bord
@@ -395,9 +397,24 @@ branché dessus affiche donc « 0 run actif, 0 worker enregistré » avec la mê
 assurance qu'un vrai relevé. C'est exactement le genre de chiffre rassurant et
 faux que ce projet passe son temps à refuser ailleurs.
 
-Le détecteur de ports ne le verra jamais : ce ne sont pas des méthodes de port.
-Soit on les alimente depuis la boucle de maintenance, qui connaît déjà ces
-cinq nombres, soit on les retire.
+**Corrigé pour les cinq jauges.** La boucle de maintenance les échantillonne
+désormais à chaque passe : elle tourne déjà sur un timer et connaît déjà ces
+cinq nombres, et une jauge est un relevé du présent plutôt qu'un événement —
+elle appartient donc au travail périodique, pas aux chemins de code qui font
+varier la quantité. La télémétrie n'est jamais porteuse : un registre illisible
+fait sauter l'échantillon, pas la passe de maintenance qui vient de remettre du
+vrai travail en file. `GET /metrics` sert l'exposition, et répond **404** quand
+`METRICS_ENABLED` est faux plutôt qu'un 200 vide — un scrape qui réussit et ne
+renvoie rien est indiscernable d'une plateforme qui ne fait rien, ce qui est
+exactement la confusion que ce point dénonce.
+
+Ce qui **reste** : les compteurs et histogrammes (`llm_requests_total`,
+`llm_request_latency_seconds`, `tool_executions_total`, `job_retries_total`…)
+n'ont toujours aucun appelant. Les brancher demande d'instrumenter l'adaptateur
+d'inférence et l'exécuteur d'outils, ce qui est un chantier distinct. La
+différence avec avant : ils sont maintenant visibles dans `/metrics`, à zéro,
+au lieu d'être invisibles — et une valeur à zéro qu'on peut voir est plus
+honnête qu'une absence qu'on ne peut pas.
 
 ---
 

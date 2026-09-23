@@ -15,12 +15,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from application.orchestration.orchestrator import RunOrchestrator
-from application.ports import UnitOfWorkFactory
+from application.ports import MetricsRecorder, UnitOfWorkFactory
 from application.services.event_publisher import commit_and_publish
 from application.use_cases.workers import ReapStaleWorkersUseCase
+from domain.enums import JobType
 from domain.ports.clock import Clock
 from domain.ports.event_bus import EventBus
 from domain.ports.job_queue import JobQueue
+from domain.ports.worker_registry import WorkerRegistry
 from domain.value_objects.identifiers import JobId
 
 __all__ = ["MaintenanceConfig", "MaintenanceLoop"]
@@ -46,6 +48,8 @@ class MaintenanceLoop:
         clock: Clock,
         reaper: ReapStaleWorkersUseCase,
         orchestrator: RunOrchestrator | None = None,
+        registry: WorkerRegistry | None = None,
+        metrics: MetricsRecorder | None = None,
         config: MaintenanceConfig | None = None,
     ) -> None:
         self._queue = queue
@@ -54,6 +58,8 @@ class MaintenanceLoop:
         self._clock = clock
         self._reaper = reaper
         self._orchestrator = orchestrator
+        self._registry = registry
+        self._metrics = metrics
         self._config = config or MaintenanceConfig()
         self._stopping = asyncio.Event()
 
@@ -79,7 +85,47 @@ class MaintenanceLoop:
         for job_id in expired:
             if await self._requeue(job_id):
                 requeued.append(job_id)
+
+        await self._observe()
         return requeued
+
+    async def _observe(self) -> None:
+        """Publish the five gauges the platform declares.
+
+        They were declared on day one and nothing ever set them. That is not a
+        gap that shows up as a missing metric: an unfed Prometheus gauge reads
+        **zero**, so a dashboard wired to these reported "no active runs, no
+        registered workers" with exactly the confidence of a real measurement.
+
+        This loop is the right place because it already runs on a timer and
+        already holds every number: a gauge is a sample of the present, not an
+        event, so it belongs with the other periodic work rather than scattered
+        across the code paths that happen to change the underlying quantity.
+
+        Telemetry is never load-bearing here. A registry that cannot be read is
+        a reason to skip the sample, not to fail a maintenance pass that has
+        just requeued real work.
+        """
+        if self._metrics is None:
+            return
+        try:
+            async with self._uow_factory() as uow:
+                active_runs = len(await uow.runs.list_active())
+            self._metrics.gauge("active_runs", active_runs)
+
+            for job_type in JobType:
+                self._metrics.gauge(
+                    "queued_jobs", await self._queue.depth(job_type), job_type=job_type.value
+                )
+
+            if self._registry is not None:
+                workers = await self._registry.list_all()
+                available = await self._registry.list_available()
+                self._metrics.gauge("registered_workers", len(workers))
+                self._metrics.gauge("healthy_workers", len(available))
+                self._metrics.gauge("active_jobs", sum(w.active_jobs for w in workers))
+        except Exception:
+            _log.warning("could not sample the platform gauges", exc_info=True)
 
     async def run_forever(self) -> None:
         self._stopping.clear()
