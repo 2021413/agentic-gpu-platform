@@ -160,6 +160,9 @@ class RedisJobQueue:
                     str(consumer),
                     now.isoformat(),
                     expires_at.isoformat(),
+                    self._keys.ready_prefix,
+                    self._keys.delayed_prefix,
+                    ",".join(job_type.value for job_type in wanted),
                 ],
             ),
         )
@@ -215,16 +218,36 @@ class RedisJobQueue:
             ],
         )
 
-    async def release(self, *, job_id: JobId, token: LeaseToken, requeue: bool) -> None:
-        """Give a job back, optionally making it immediately claimable again.
+    async def release(
+        self,
+        *,
+        job_id: JobId,
+        token: LeaseToken,
+        requeue: bool,
+        not_before: datetime | None = None,
+    ) -> None:
+        """Give a job back, optionally making it claimable again, possibly later.
 
         The attempt counter is left where the claim put it: the attempt really
         was spent, and hiding that would let a job loop forever between a
         worker that cannot do it and a queue that keeps offering it.
+
+        A deferred requeue lands in the delayed set instead of the ready set,
+        and `claim` promotes it when its time comes. It is deliberately not a
+        sweeper: promotion happening inside the same script as the claim means
+        there is no instant at which a due job belongs to neither set.
         """
+        deferred = requeue and not_before is not None
         await self._release(
             keys=[self._keys.job(job_id), self._keys.leases],
-            args=[str(job_id), token.value, "1" if requeue else "0", self._keys.ready_prefix],
+            args=[
+                str(job_id),
+                token.value,
+                "2" if deferred else ("1" if requeue else "0"),
+                self._keys.ready_prefix,
+                _epoch_ms(not_before) if not_before is not None else "0",
+                self._keys.delayed_prefix,
+            ],
         )
 
     # -- recovery -------------------------------------------------------
@@ -280,10 +303,19 @@ class RedisJobQueue:
         counting them would make the queue look deep precisely when it is being
         drained fastest.
         """
+        # Jobs waiting out a retry delay are counted too. They are queued, they
+        # have no worker, and they are exactly what somebody reading this number
+        # needs to see — a backlog that is invisible while it waits is worse
+        # than no number at all.
         if job_type is not None:
-            return int(await self._redis.zcard(self._keys.ready(job_type)))
+            async with self._redis.pipeline(transaction=False) as pipe:
+                pipe.zcard(self._keys.ready(job_type))
+                pipe.zcard(self._keys.delayed(job_type))
+                counts = cast("list[int]", await pipe.execute())
+            return sum(counts)
         async with self._redis.pipeline(transaction=False) as pipe:
             for known in JobType:
                 pipe.zcard(self._keys.ready(known))
+                pipe.zcard(self._keys.delayed(known))
             depths = cast("list[int]", await pipe.execute())
         return sum(depths)

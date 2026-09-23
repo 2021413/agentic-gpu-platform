@@ -48,8 +48,26 @@ class JobQueue(Protocol):
         """Remove a finished job from the queue."""
         ...
 
-    async def release(self, *, job_id: JobId, token: LeaseToken, requeue: bool) -> None:
-        """Give a job back, optionally making it immediately claimable again."""
+    async def release(
+        self,
+        *,
+        job_id: JobId,
+        token: LeaseToken,
+        requeue: bool,
+        not_before: datetime | None = None,
+    ) -> None:
+        """Give a job back, optionally making it claimable again.
+
+        ``not_before`` defers when it becomes claimable. A retry worth
+        attempting again is not always worth attempting *now*: when the failure
+        was "no worker is available", nothing but time can change the answer,
+        and offering the job back immediately spends an attempt on the same
+        empty fleet. Observed against a single-GPU fleet — which scale-to-zero
+        makes the normal case — as three attempts burned in four seconds.
+
+        An absolute instant rather than a duration, so the adapter never has to
+        have an opinion about what time it is.
+        """
         ...
 
     async def reclaim_expired(self, *, now: datetime, limit: int = 100) -> Sequence[JobId]:

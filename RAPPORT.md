@@ -137,14 +137,21 @@ changement de schéma (table `projects`, schéma HTTP, migration). Non fait.
 
 ---
 
-## 6. La toolchain d'un projet est figée à sa création
+## 6. La toolchain d'un projet est corrigeable — ~~figée à sa création~~
 
-Il n'existe aucune route de mise à jour d'un projet. Créer un projet qui existe
-déjà renvoie l'enregistrement existant, **inchangé**. Un run a été dépensé à
-exécuter `pytest` après que l'appelant eut remplacé cette commande.
+Créer un projet qui existe déjà renvoie toujours l'enregistrement existant,
+**inchangé** : la création n'est pas une mise à jour. Un run avait été dépensé
+à exécuter `pytest` après que l'appelant eut remplacé cette commande.
 
-`run-on.sh` compare désormais et refuse en proposant `NAME=`. L'API, elle, ne
-permet toujours pas de corriger un projet : il faut en créer un autre.
+`PUT /v1/projects/{id}/toolchain` remplace désormais les commandes, et elles
+seules : le chemin, la branche et le nom identifient le code sur lequel
+l'historique des runs a été produit, ils ne sont pas dans la charge utile
+(`422` si on les y glisse). Le remplacement est total — une commande omise est
+une commande supprimée. Refusé (`409 project_not_modifiable`) tant qu'un run du
+projet est en vol : un run relit ces commandes à chaque validation de candidat,
+et les changer sous lui ferait juger ses candidats selon deux définitions de
+« ça passe ». `run-on.sh` corrige maintenant au lieu de refuser, et ne propose
+`NAME=` que si l'API refuse.
 
 ---
 
@@ -251,9 +258,27 @@ d'étapes. Le run avait déjà fait planifier, coder, construire et tester **deu
 candidats complets** ; il est mort sur une absence qui a duré moins d'une
 minute.
 
-Ce qu'il faudrait : un délai entre les tentatives quand l'échec est
-« aucun worker », et de préférence un délai qui tienne compte du fait qu'un
-worker peut être en train de démarrer. La correction n'est pas faite.
+**Corrigé à moitié, et la moitié qui reste est chiffrée.**
+
+Le délai est désormais réel. `RetryPolicy` en calculait un depuis toujours et
+`release()` le jetait : la file accepte maintenant un `not_before`, le job
+attend dans un ensemble séparé par type, et il rejoint sa place **avec son
+score d'origine** — attendre est une pause, pas une rétrogradation. Un job en
+attente reste compté dans `depth()`, parce que c'est le chiffre qu'on lit pour
+savoir si quelque chose est coincé. La promotion se fait dans le script de
+réclamation lui-même, pas dans un balayeur, donc il n'existe aucun instant où
+un job dû n'appartient à aucun ensemble. Les deux adaptateurs sont tenus par la
+même suite de contrat, et elle a d'ailleurs attrapé un désaccord entre eux
+avant que je le voie.
+
+Ce qui **reste** : la grandeur du délai. La politique produit 1 s puis 2 s sur
+un échec d'infrastructure, et trois tentatives espacées ainsi ne survivent pas
+à un démarrage à froid de **130 s** — chiffre mesuré, pas estimé. Honorer le
+délai était nécessaire ; ce n'est pas suffisant. La bonne correction est
+probablement de distinguer « aucun worker compatible » des autres échecs
+d'infrastructure, parce que c'est le seul pour lequel la seule chose qui puisse
+changer est le temps, et de caler son attente sur le coût d'un démarrage à
+froid plutôt que sur une exponentielle qui part d'une seconde. Non fait.
 
 ---
 

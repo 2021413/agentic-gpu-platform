@@ -60,6 +60,27 @@ class Keyspace:
     def ready_prefix(self) -> str:
         return f"{self.prefix}:ready:"
 
+    def delayed(self, job_type: JobType) -> str:
+        """Sorted set of jobs queued but not yet claimable, scored by the moment
+        they become claimable.
+
+        A retry worth attempting again is not always worth attempting *now*:
+        when the failure was "no worker is available", the only thing that can
+        change is time. Holding those outside the ready set — rather than
+        letting the claim loop skip over them — is what stops a job burning
+        three attempts in four seconds against an empty fleet.
+
+        Partitioned by type like `ready`, and for the same reason: `depth` is
+        asked per type, and a waiting job has to be counted there. A single
+        global set would have made a job invisible to the one number an
+        operator reads to decide whether anything is stuck.
+        """
+        return f"{self.prefix}:delayed:{job_type.value}"
+
+    @property
+    def delayed_prefix(self) -> str:
+        return f"{self.prefix}:delayed:"
+
     @property
     def leases(self) -> str:
         """Sorted set of in-flight jobs scored by lease expiry, so reclaiming is a range query."""

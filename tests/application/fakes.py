@@ -122,6 +122,9 @@ class _Repo[TId, TEntity]:
 
 
 class _ProjectRepo(_Repo[ProjectId, Project]):
+    async def update_toolchain(self, project: Project) -> None:
+        self.items[project.id] = project
+
     async def get_by_name(self, name: str) -> Project | None:
         return next((p for p in self.items.values() if p.name == name), None)
 
@@ -337,6 +340,8 @@ class FakeJobQueue:
         self._clock = clock
         self._queued: list[Job] = []
         self._leased: dict[JobId, tuple[Job, Lease]] = {}
+        self.deferred: dict[JobId, datetime | None] = {}
+        """When each released job was asked to become claimable again."""
         self.enqueued: list[JobId] = []
 
     async def enqueue(self, job: Job) -> None:
@@ -376,9 +381,23 @@ class FakeJobQueue:
     async def acknowledge(self, *, job_id: JobId, token: LeaseToken) -> None:
         self._leased.pop(job_id, None)
 
-    async def release(self, *, job_id: JobId, token: LeaseToken, requeue: bool) -> None:
+    async def release(
+        self,
+        *,
+        job_id: JobId,
+        token: LeaseToken,
+        requeue: bool,
+        not_before: datetime | None = None,
+    ) -> None:
         entry = self._leased.pop(job_id, None)
         if entry is not None and requeue:
+            # The delay is recorded, not honoured: these tests drive the
+            # orchestrator directly and have no clock to wait on. What they can
+            # assert is that the orchestrator *asked* for one, which is the part
+            # that was missing — the policy computed a delay and nothing passed
+            # it on. The two real adapters are held to the waiting itself by the
+            # queue contract suite.
+            self.deferred[job_id] = not_before
             self._queued.append(entry[0])
 
     async def reclaim_expired(self, *, now: datetime, limit: int = 100) -> Sequence[JobId]:

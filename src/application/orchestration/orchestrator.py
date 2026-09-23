@@ -902,8 +902,15 @@ class RunOrchestrator:
             uow.collect(job)
             await commit_and_publish(uow, self._bus)
 
+        # The policy computes a delay and, until now, nothing honoured it. With
+        # a single-worker fleet — which scale-to-zero makes ordinary — an
+        # immediate requeue means the next attempt asks the same empty pool the
+        # same question: a real run spent all three attempts in four seconds.
         await self._queue.release(
-            job_id=job.id, token=lease.token, requeue=decision.should_retry_job
+            job_id=job.id,
+            token=lease.token,
+            requeue=decision.should_retry_job,
+            not_before=(now + decision.delay) if decision.delay else None,
         )
         if decision.should_retry_job:
             async with self._uow_factory() as uow:
