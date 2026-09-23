@@ -1,16 +1,69 @@
-# Local project mounting.
-#
-# The orchestrator creates git worktrees from the project it is given, so a
-# project referenced by `local_path` must be reachable from inside the api
-# container — not merely from your shell. This file bind-mounts one directory
-# from the host so `local_path` can point at it.
-#
-# Set LOCAL_PROJECT_PATH in .env to the absolute path of your project, then:
-#   make docker-up
-#
-# The mount is read-write on purpose: the accepted patch is merged back into
-# the base repository through a controlled `git merge`, and that writes.
+# Projects are no longer mounted from the host. They are uploaded through
+# `POST /v1/projects/upload` (or the viewer) and live on the `projects-data`
+# volume, one directory each, owned by the api container. The bind mount that
+# used to be here made every project point at the same path, so selecting one
+# in the viewer ran the agents against whatever happened to be mounted.
 services:
-  api:
-    volumes:
-      - ${LOCAL_PROJECT_PATH:?set LOCAL_PROJECT_PATH in .env}:/projects/current:rw
+  # A worker agent for an inference server that lives somewhere else — today a
+  # Modal Server, an HTTPS endpoint that scales to zero. The agent runs here,
+  # next to the control plane; only the model is remote.
+  #
+  # An endpoint at zero containers is the normal resting state, not an outage.
+  # It answers HTTP 503 rather than refusing the connection, and boots a
+  # container in response to that same request. Two consequences:
+  #
+  #   - Startup is slow by design. The agent's readiness probe is what wakes
+  #     the endpoint, and it polls until the container is up, so first
+  #     registration takes a cold start. That is expected, not a hang.
+  #   - The 503 has to be read as "starting" on BOTH sides, for different
+  #     reasons. The control plane owns the adapter that sends completions and
+  #     must wait rather than fail. This agent must stop probing: its liveness
+  #     check runs every ten seconds, and against an endpoint that boots a
+  #     container in response to any request, polling would keep an H100 warm
+  #     around the clock. Registration still probes once, because reconciling
+  #     what the engine really serves is worth one cold start.
+  #     Set INFERENCE_SCALE_TO_ZERO=true in .env; both services read it.
+  #
+  # MODEL_ID and MODEL_CONTEXT_LENGTH below are deliberately not assumed to be
+  # what the endpoint serves. The agent reconciles both against /v1/models, or
+  # the control plane sends a name the engine answers 404 to and advertises a
+  # context window several times the one it has.
+  worker-remote:
+    profiles: ["remote"]
+    image: agentic-api:dev
+    restart: "no"
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["agentic-worker"]
+    environment:
+      CONTROL_PLANE_URL: http://api:8000
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token-change-me}
+      LLM_PROVIDER: openai_compatible
+      # One URL, used twice, and it must be the server ROOT with no /v1: the
+      # probe appends /health and /v1/models, and the control plane's adapter
+      # posts to <WORKER_ENDPOINT>/v1/chat/completions. A /v1 suffix breaks
+      # readiness and every completion at once.
+      #
+      # The same placeholder on both, because they previously disagreed:
+      # INFERENCE_BASE_URL fell back to a fake host while WORKER_ENDPOINT fell
+      # back to nothing, so an unset variable registered an empty endpoint
+      # rather than failing anywhere legible. It cannot be `:?` — compose
+      # interpolates every service whatever the active profile, so a required
+      # variable here would stop the default stack from starting too.
+      INFERENCE_BASE_URL: ${REMOTE_INFERENCE_URL:-https://set-REMOTE_INFERENCE_URL-in-env.invalid}
+      INFERENCE_API_KEY: ${INFERENCE_API_KEY:-}
+      # Suppresses the ten-second liveness probe. Without it this agent alone
+      # keeps a GPU alive permanently, and the bill arrives before anyone
+      # notices that nothing was ever inferred.
+      INFERENCE_SCALE_TO_ZERO: ${INFERENCE_SCALE_TO_ZERO:-false}
+      # The control plane reaches the model through what the worker registers,
+      # so this is the inference endpoint itself, not a local address.
+      WORKER_ENDPOINT: ${REMOTE_INFERENCE_URL:-https://set-REMOTE_INFERENCE_URL-in-env.invalid}
+      MODEL_ID: ${MODEL_ID:-Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8}
+      MODEL_CONTEXT_LENGTH: ${MODEL_CONTEXT_LENGTH:-131072}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      WORKER_ROLES: PLANNER,CODER,REVIEWER
+      HEARTBEAT_INTERVAL_SECONDS: "10"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: console

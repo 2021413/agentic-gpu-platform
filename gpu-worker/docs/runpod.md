@@ -209,7 +209,7 @@ broken rather than as deployed. `WORKER_IMAGE` selects the image to run.
 The key is read from `RUNPOD_API_KEY` and nowhere else: there is no flag, no
 file path and no default, and it is redacted from every log and error.
 
-## Why not Serverless
+## Why not RunPod Serverless
 
 RunPod Serverless runs a **handler** that pulls jobs from RunPod's own queue.
 It has no stable, self-registering HTTP endpoint, and its lifecycle is owned by
@@ -217,4 +217,16 @@ RunPod rather than by our control plane — which schedules at the job level and
 needs to reach a worker directly. Serverless also cold-starts from scratch,
 which for a 31 GB model is exactly what the persistent volume exists to avoid.
 
-Use Pods.
+On RunPod, use Pods.
+
+### This is not an argument against serverless GPUs in general
+
+Both objections above are specific to RunPod's implementation, and
+[Modal](modal.md) answers both: a Modal Server is an ordinary HTTP server at a
+stable HTTPS URL, reached directly by the control plane, and it mounts a
+persistent Volume so a cold start reads 31.2 GB off a disk rather than off the
+internet.
+
+`infra/modal/` is that deployment. It scales to zero, which a Pod cannot, and it
+does not go looking for capacity in one region at a time — which is what made
+this document's advice expensive on the days EU-FR-1 had none.

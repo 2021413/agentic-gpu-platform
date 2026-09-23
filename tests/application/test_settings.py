@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from bootstrap.config import Environment, LLMProviderKind, Settings, WorkerSettings
+from bootstrap.config import (
+    PUBLISHED_DEV_SERVICE_TOKEN,
+    Environment,
+    LLMProviderKind,
+    Settings,
+    WorkerSettings,
+)
 from domain.enums import AgentRole
 
 
@@ -24,6 +30,27 @@ def test_a_timeout_shorter_than_the_beat_is_rejected() -> None:
 def test_production_requires_a_service_token() -> None:
     with pytest.raises(ValidationError, match="SERVICE_TOKEN"):
         settings(environment=Environment.PRODUCTION, service_token="")
+
+
+def test_production_refuses_the_published_default_service_token() -> None:
+    """The compose default is not a secret: it is committed to this repository,
+    so a deployment that keeps it is authenticated by a value anyone can read.
+    An empty token was already refused; this one is non-empty and used to pass."""
+    with pytest.raises(ValidationError, match="published default"):
+        settings(
+            environment=Environment.PRODUCTION,
+            service_token=PUBLISHED_DEV_SERVICE_TOKEN,
+        )
+
+
+def test_local_development_still_accepts_the_published_default_token() -> None:
+    """Developers run against the compose default every day; refusing it
+    everywhere would break every local stack to fix a production problem."""
+    config = settings(
+        environment=Environment.LOCAL, service_token=PUBLISHED_DEV_SERVICE_TOKEN
+    )
+
+    assert config.service_token.get_secret_value() == PUBLISHED_DEV_SERVICE_TOKEN
 
 
 def test_the_fake_provider_is_refused_in_production() -> None:
@@ -55,3 +82,14 @@ def test_worker_roles_are_parsed_and_typos_are_fatal() -> None:
 
 def test_the_service_token_is_not_printed_by_accident() -> None:
     assert "super-secret" not in repr(settings(service_token="super-secret"))
+
+
+# -- the prompt is more than the code excerpt ------------------------------
+def test_the_prompt_overhead_allowance_reaches_the_orchestrator() -> None:
+    """The fleet reports room for a whole prompt; the excerpt is only part of
+    it. Counting only the excerpt made the first real run fail by exactly one
+    token — 28672 packed into a 32768 window with 4096 reserved for the answer,
+    and the template pushed it to 28673."""
+    settings = Settings(prompt_overhead_tokens=3_000, _env_file=None)  # type: ignore[call-arg]
+
+    assert settings.prompt_overhead_tokens == 3_000

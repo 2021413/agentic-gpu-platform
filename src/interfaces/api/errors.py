@@ -98,7 +98,13 @@ STATUS_BY_CODE: Final[Mapping[str, int]] = {
     # will keep failing until the resource moves — that is exactly "conflict".
     "invalid_state_transition": 409,
     "run_not_modifiable": 409,
+    "project_not_modifiable": 409,
+    "project_exists": 409,
     "run_cancelled": 409,
+    # 400: the request could be parsed but what it carried cannot become a
+    # project — an empty upload, a corrupt archive, a path that escapes.
+    "project_upload_invalid": 400,
+    "toolchain_command_unavailable": 400,
     "job_lease_expired": 409,
     "job_not_retryable": 409,
     # A named worker exists but cannot take work: again a state conflict about a
@@ -137,6 +143,10 @@ _TITLES: Final[Mapping[str, str]] = {
     "not_found": "Resource not found",
     "invalid_state_transition": "Invalid state transition",
     "run_not_modifiable": "Run is no longer modifiable",
+    "project_not_modifiable": "Project is in use by a run",
+    "project_exists": "A project with that name already exists",
+    "project_upload_invalid": "Upload cannot become a project",
+    "toolchain_command_unavailable": "Toolchain command cannot be started",
     "run_cancelled": "Run has been cancelled",
     "job_lease_expired": "Job lease expired",
     "job_not_retryable": "Job cannot be retried",

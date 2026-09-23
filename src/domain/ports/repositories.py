@@ -8,7 +8,6 @@ SQLAlchemy, sessions or SQL.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
 from types import TracebackType
 from typing import Protocol, runtime_checkable
 
@@ -18,7 +17,6 @@ from domain.entities.plan import Plan
 from domain.entities.project import Project
 from domain.entities.review import Review
 from domain.entities.run import Run
-from domain.enums import JobStatus, RunStatus
 from domain.events.base import DomainEvent
 from domain.value_objects.identifiers import (
     CandidateId,
@@ -50,6 +48,16 @@ class ProjectRepository(Protocol):
     async def get_by_name(self, name: str) -> Project | None: ...
     async def list_all(self, *, limit: int = 100, offset: int = 0) -> Sequence[Project]: ...
 
+    async def update_toolchain(self, project: Project) -> None:
+        """Persist the project's commands, and nothing else about it.
+
+        Deliberately narrower than the ``update`` the other repositories
+        expose: a project's source and branch are the identity its run history
+        hangs on, and a general ``update`` would make overwriting them a typo
+        away. What cannot be written cannot be written by accident.
+        """
+        ...
+
 
 @runtime_checkable
 class RunRepository(Protocol):
@@ -69,8 +77,6 @@ class RunRepository(Protocol):
         """Non-terminal runs — what an orchestrator resumes after a restart."""
         ...
 
-    async def count_by_status(self) -> dict[RunStatus, int]: ...
-
 
 @runtime_checkable
 class JobRepository(Protocol):
@@ -81,12 +87,6 @@ class JobRepository(Protocol):
     async def find_by_idempotency_key(self, key: IdempotencyKey) -> Job | None: ...
 
     async def list_by_run(self, run_id: RunId) -> Sequence[Job]: ...
-
-    async def list_by_status(self, status: JobStatus, *, limit: int = 100) -> Sequence[Job]: ...
-
-    async def list_expired_leases(self, *, now: datetime, limit: int = 100) -> Sequence[Job]:
-        """Durable counterpart of the queue's reclaim, used on orchestrator restart."""
-        ...
 
 
 @runtime_checkable
@@ -109,7 +109,6 @@ class CandidateRepository(Protocol):
 class ReviewRepository(Protocol):
     async def add(self, review: Review) -> None: ...
     async def list_by_candidate(self, candidate_id: CandidateId) -> Sequence[Review]: ...
-    async def latest_for_candidate(self, candidate_id: CandidateId) -> Review | None: ...
 
 
 @runtime_checkable
@@ -166,7 +165,18 @@ class UnitOfWork(Protocol):
         ...
 
     async def commit(self) -> None: ...
-    async def rollback(self) -> None: ...
+
+    async def rollback(self) -> None:
+        """Abandon the transaction explicitly.
+
+        ``scripts/unused-ports.sh`` reports this as uncalled and always will:
+        the only caller is ``__aexit__``, which lives in the adapter rather
+        than in a use case. It stays because a transactional boundary that can
+        only commit is not one — the implicit rollback on an exception is this
+        method, and a caller that decides mid-transaction to abandon its work
+        would otherwise have to raise to get it.
+        """
+        ...
 
     def collect(self, *entities: object) -> None:
         """Register aggregates whose buffered events must be drained on commit."""

@@ -11,19 +11,25 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from application.dto.agent_io import CodeDraft, PlanDraft, ReviewDraft
-from domain.entities.project import Project
+from application.dto.commands import UploadedFile
+from domain.entities.project import Project, ToolchainConfig
 from domain.enums import AgentRole
 from domain.ports.repositories import UnitOfWork
 from domain.ports.tools import ToolExecutor
-from domain.value_objects.identifiers import RunId
+from domain.value_objects.identifiers import ProjectId, RunId
 from domain.value_objects.llm import ChatMessage
 
 __all__ = [
     "AgentOutputCodec",
+    "CommandProbe",
+    "MaterialisedProject",
+    "MetricsExposition",
     "MetricsRecorder",
+    "ProjectFilesStore",
     "PromptRenderer",
     "RenderedPrompt",
     "RunCoordinator",
@@ -107,6 +113,58 @@ class MetricsRecorder(Protocol):
     def increment(self, name: str, value: int = 1, **labels: str) -> None: ...
     def observe(self, name: str, value: float, **labels: str) -> None: ...
     def gauge(self, name: str, value: float, **labels: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialisedProject:
+    """Where an upload landed, and what it looks like it is."""
+
+    path: Path
+    toolchain: ToolchainConfig
+    file_count: int
+
+
+class CommandProbe(Protocol):
+    """Answers whether a toolchain command could start where the tools run.
+
+    Returns the executable it could not find, or ``None`` when the command is
+    fine (or absent). A callable rather than a boolean so the refusal can name
+    the word that was not a program.
+    """
+
+    def __call__(self, command: str | None) -> str | None: ...
+
+
+@runtime_checkable
+class ProjectFilesStore(Protocol):
+    """Turns uploaded files into a repository the orchestrator can branch from.
+
+    The store owns the location. Callers never choose a path, which is the
+    whole point: a project whose files live wherever a client said cannot be
+    selected from an interface, and one that shares a mount with every other
+    project runs the agents on whichever code happens to be there.
+    """
+
+    async def materialise(
+        self, project_id: ProjectId, files: Sequence[UploadedFile]
+    ) -> MaterialisedProject: ...
+
+
+@runtime_checkable
+class MetricsExposition(Protocol):
+    """Renders the current metric values for a scraper.
+
+    A port rather than a direct import because the HTTP layer may not reach
+    into `infrastructure`, and an architecture test enforces it. The content
+    type travels with the payload for the same reason: Prometheus is picky
+    about the exact string, and it belongs to whoever produces the bytes rather
+    than to the route that hands them over.
+    """
+
+    @property
+    def content_type(self) -> str: ...
+
+    def render(self) -> bytes: ...
 
 
 @runtime_checkable

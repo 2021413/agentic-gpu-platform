@@ -552,3 +552,138 @@ def test_factory_requires_a_model_id() -> None:
 
     with pytest.raises(ValueError, match="model_id"):
         factory.for_endpoint(WorkerEndpoint("http://worker-a:8000"), model_id="")
+
+
+# -- serverless endpoints (Modal Servers) ----------------------------------
+#
+# A Modal Server does not queue: with no container running, its proxy answers
+# 503 immediately and starts one in response to that same request. Every test
+# below exists because getting this wrong is not a crash but a bill — a cold
+# start paid on every idle cycle and attributed to a job that failed.
+
+SERVERLESS = OpenAICompatibleSettings(
+    scale_to_zero=True,
+    cold_start_max_wait_seconds=1.0,
+    cold_start_poll_seconds=0.01,
+)
+
+
+def cold_then(cold: int, served: Handler) -> Handler:
+    """A server that answers 503 ``cold`` times, then hands over to ``served``."""
+    remaining = {"n": cold}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if remaining["n"] > 0:
+            remaining["n"] -= 1
+            return httpx.Response(503, text="no containers available")
+        result = served(request)
+        assert isinstance(result, httpx.Response)
+        return result
+
+    return handler
+
+
+async def test_a_cold_serverless_endpoint_is_waited_for() -> None:
+    recorder = Recorder()
+    provider = make_provider(cold_then(2, recorder), settings=SERVERLESS)
+
+    result = await provider.complete(simple_request())
+
+    assert result.content == "ok"
+    assert len(recorder.requests) == 1, "only the successful attempt reaches the engine"
+
+
+async def test_the_retried_request_carries_its_body_again() -> None:
+    """An httpx.Request cannot be sent twice: its stream is consumed.
+
+    Reusing one would send an empty body to the container that finally booted,
+    and vLLM would answer 400 to a request the caller believes it sent.
+    """
+    seen: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.content)
+        if len(seen) < 3:
+            return httpx.Response(503, text="no containers available")
+        return chat_response()
+
+    provider = make_provider(handler, settings=SERVERLESS)
+    await provider.complete(simple_request())
+
+    assert len(seen) == 3
+    assert all(body and json.loads(body)["messages"] for body in seen)
+
+
+async def test_a_serverless_endpoint_gives_up_when_the_budget_runs_out() -> None:
+    provider = make_provider(
+        lambda _r: httpx.Response(503, text="no containers available"),
+        settings=OpenAICompatibleSettings(
+            scale_to_zero=True,
+            cold_start_max_wait_seconds=0.05,
+            cold_start_poll_seconds=0.01,
+        ),
+    )
+
+    with pytest.raises(InferenceError) as caught:
+        await provider.complete(simple_request())
+
+    assert caught.value.status_code == 503
+    assert "no worker became available" in str(caught.value)
+
+
+async def test_503_is_a_plain_failure_on_a_dedicated_endpoint() -> None:
+    """A RunPod Pod that answers 503 is broken, and waiting would hide it."""
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, text="engine unavailable")
+
+    provider = make_provider(handler)
+
+    with pytest.raises(InferenceError) as caught:
+        await provider.complete(simple_request())
+
+    assert calls["n"] == 1, "no retry without scale_to_zero"
+    assert caught.value.status_code == 503
+
+
+async def test_health_reports_a_scaled_to_zero_endpoint_as_healthy() -> None:
+    """Idle is the resting state of a serverless worker, not a fault.
+
+    Reporting it unhealthy would have the registry evict the only worker there
+    is, every time nobody used it for a minute.
+    """
+    provider = make_provider(
+        lambda _r: httpx.Response(503, text="no containers available"), settings=SERVERLESS
+    )
+
+    assert await provider.health() is True
+
+
+async def test_health_reports_503_as_unhealthy_on_a_dedicated_endpoint() -> None:
+    provider = make_provider(lambda _r: httpx.Response(503, text="engine unavailable"))
+
+    assert await provider.health() is False
+
+
+async def test_a_cold_serverless_endpoint_is_waited_for_when_streaming() -> None:
+    attempts = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            return httpx.Response(503, text="no containers available")
+        body = (
+            'data: {"choices":[{"delta":{"content":"he"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n'
+            "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, text=body)
+
+    provider = make_provider(handler, settings=SERVERLESS)
+
+    chunks = [chunk async for chunk in provider.stream(simple_request())]
+
+    assert "".join(chunks) == "hello"
+    assert attempts["n"] == 3

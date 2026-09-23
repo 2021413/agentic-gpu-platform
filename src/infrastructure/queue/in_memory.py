@@ -99,11 +99,15 @@ class InMemoryJobQueue:
         self._ready: dict[JobType, dict[JobId, int]] = {}
         self._scores: dict[JobId, int] = {}
         self._leases: dict[JobId, datetime] = {}
+        # Queued, but not claimable until the instant stored here. Kept beside
+        # the ready sets rather than inside them so that "is there work" and
+        # "is it due" stay two separate questions.
+        self._delayed: dict[JobId, datetime] = {}
         self._runs: dict[RunId, set[JobId]] = {}
         self._acknowledged: set[JobId] = set()
 
     # -- publication ----------------------------------------------------
-    async def enqueue(self, job: Job) -> None:
+    async def enqueue(self, job: Job, *, not_before: datetime | None = None) -> None:
         """Publish a job. Enqueuing the same job twice must not duplicate work."""
         async with self._lock:
             stored = self._jobs.get(job.id)
@@ -114,6 +118,12 @@ class InMemoryJobQueue:
             score = queue_score(job.priority, job.created_at)
             self._jobs[job.id] = _rebuild(job, status=JobStatus.QUEUED)
             self._scores[job.id] = score
+            # A republication that dropped the delay would undo the release
+            # that had just applied it; a requeue is both calls together.
+            if not_before is None:
+                self._delayed.pop(job.id, None)
+            else:
+                self._delayed[job.id] = not_before
             self._ready.setdefault(job.type, {})[job.id] = score
             self._runs.setdefault(job.run_id, set()).add(job.id)
 
@@ -137,7 +147,7 @@ class InMemoryJobQueue:
             return None
         async with self._lock:
             while True:
-                candidate = self._next_ready(wanted)
+                candidate = self._next_ready(wanted, now)
                 if candidate is None:
                     return None
                 job_type, job_id = candidate
@@ -157,7 +167,9 @@ class InMemoryJobQueue:
                 self._leases[job_id] = lease.expires_at
                 return claimed, lease
 
-    def _next_ready(self, wanted: Sequence[JobType]) -> tuple[JobType, JobId] | None:
+    def _next_ready(
+        self, wanted: Sequence[JobType], now: datetime
+    ) -> tuple[JobType, JobId] | None:
         """Lowest score across the requested types, ties broken by id.
 
         The tie-break matters: a sorted set orders equal scores
@@ -168,6 +180,9 @@ class InMemoryJobQueue:
         best: tuple[tuple[int, str], JobType, JobId] | None = None
         for job_type in wanted:
             for job_id, score in self._ready.get(job_type, {}).items():
+                ready_at = self._delayed.get(job_id)
+                if ready_at is not None and ready_at > now:
+                    continue
                 key = (score, str(job_id))
                 if best is None or key < best[0]:
                     best = (key, job_type, job_id)
@@ -199,8 +214,15 @@ class InMemoryJobQueue:
             self._acknowledged.add(job_id)
             self._jobs[job_id] = _rebuild(job, lease=None, assigned_worker_id=None)
 
-    async def release(self, *, job_id: JobId, token: LeaseToken, requeue: bool) -> None:
-        """Give a job back, optionally making it immediately claimable again."""
+    async def release(
+        self,
+        *,
+        job_id: JobId,
+        token: LeaseToken,
+        requeue: bool,
+        not_before: datetime | None = None,
+    ) -> None:
+        """Give a job back, optionally making it claimable again, possibly later."""
         async with self._lock:
             job = self._jobs.get(job_id)
             if job is None or not self._holds(job, token):
@@ -208,8 +230,15 @@ class InMemoryJobQueue:
             self._leases.pop(job_id, None)
             status = JobStatus.QUEUED if requeue else JobStatus.PENDING
             self._jobs[job_id] = _rebuild(job, status=status, lease=None, assigned_worker_id=None)
+            self._delayed.pop(job_id, None)
             if requeue:
+                # It goes into the ready set either way: keeping the delay
+                # beside it rather than withholding the entry means a job never
+                # disappears from `depth()` while it waits, which is the number
+                # an operator reads to decide whether anything is stuck.
                 self._ready.setdefault(job.type, {})[job_id] = self._scores[job_id]
+                if not_before is not None:
+                    self._delayed[job_id] = not_before
 
     # -- recovery -------------------------------------------------------
     async def reclaim_expired(self, *, now: datetime, limit: int = 100) -> Sequence[JobId]:

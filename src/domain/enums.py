@@ -32,6 +32,14 @@ class RunStatus(StrEnum):
     VALIDATING = "VALIDATING"
     REVIEWING = "REVIEWING"
     REPAIRING = "REPAIRING"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    """Reviewed and waiting for a human to let it land.
+
+    Only reachable when the deployment asks for it. Integration is a write into
+    someone else's repository, and a run that waits for an approval nobody is
+    watching never finishes — so the gate is opt-in, and this state is not
+    terminal: it must keep appearing in the active list to be approvable at all.
+    """
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLING = "CANCELLING"
@@ -212,11 +220,31 @@ class FailureKind(StrEnum):
     INFRASTRUCTURE = "INFRASTRUCTURE"
     """Worker vanished, lease expired, connection refused, queue error."""
 
+    NO_WORKER = "NO_WORKER"
+    """Nothing in the fleet could take this job.
+
+    Split out of INFRASTRUCTURE because it is the one failure where retrying
+    changes nothing unless time passes. A lease that expired or a connection
+    that was refused may well succeed on the next attempt against a different
+    worker; an empty pool answers the same way however fast you ask it. With
+    scale-to-zero a fleet of one GPU is the ordinary case, and a job that
+    retried immediately spent all three of its attempts in four seconds while
+    the only worker was still booting.
+    """
+
     INFERENCE = "INFERENCE"
     """The model call itself failed: timeout, context overflow, server error."""
 
     INVALID_STRUCTURED_OUTPUT = "INVALID_STRUCTURED_OUTPUT"
     """The model answered, but the answer did not validate against the schema."""
+
+    OUTPUT_TRUNCATED = "OUTPUT_TRUNCATED"
+    """The answer ran out of room before it was finished.
+
+    Distinct from INVALID_STRUCTURED_OUTPUT although it arrives looking like
+    it: a truncated answer is malformed, but re-asking produces the identical
+    truncation. It is a budget problem and belongs to whoever sets the window.
+    """
 
     TOOL = "TOOL"
     """A deterministic tool could not be executed at all."""
@@ -229,7 +257,12 @@ class FailureKind(StrEnum):
     @property
     def is_infrastructure(self) -> bool:
         """Failures of the machinery rather than of the produced code."""
-        return self in (FailureKind.INFRASTRUCTURE, FailureKind.INFERENCE, FailureKind.TOOL)
+        return self in (
+            FailureKind.INFRASTRUCTURE,
+            FailureKind.NO_WORKER,
+            FailureKind.INFERENCE,
+            FailureKind.TOOL,
+        )
 
     @property
     def is_code_defect(self) -> bool:

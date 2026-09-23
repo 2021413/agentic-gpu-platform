@@ -57,19 +57,32 @@ async def register_worker(client: httpx.AsyncClient, *, concurrency: int = 2) ->
     return response.json()
 
 
+def _tracked_files(repo: Path) -> list[tuple[str, tuple[str, bytes]]]:
+    """Everything in the repository except its `.git`, read off the event loop."""
+    return [
+        ("files", (str(path.relative_to(repo)), path.read_bytes()))
+        for path in sorted(repo.rglob("*"))
+        if path.is_file() and ".git" not in path.relative_to(repo).parts
+    ]
+
+
 async def create_project(client: httpx.AsyncClient, repo: Path) -> dict:
+    """Create the project the way the platform now does it: by upload.
+
+    The JSON route used to accept a `local_path`, and every project in the
+    database pointed at the same one. The files of the temporary repository
+    are sent instead, and the server decides where they live.
+    """
+    files = await asyncio.to_thread(_tracked_files, repo)
     response = await client.post(
-        "/v1/projects",
-        json={
+        "/v1/projects/upload",
+        data={
             "name": f"http-{repo.name}",
-            "local_path": str(repo),
-            "default_branch": "main",
-            "toolchain": {
-                "language": "python",
-                "build_command": "/bin/true",
-                "test_command": "/bin/true",
-            },
+            "language": "python",
+            "build_command": "/bin/true",
+            "test_command": "/bin/true",
         },
+        files=files,
     )
     assert response.status_code in (200, 201), response.text
     return response.json()

@@ -31,7 +31,7 @@ from domain.entities.project import Project
 from domain.entities.review import Review, Severity
 from domain.entities.run import Run
 from domain.entities.worker import Worker
-from domain.enums import AgentRole, JobStatus, JobType, ReviewVerdict, RunStatus
+from domain.enums import AgentRole, JobType, ReviewVerdict
 from domain.events.base import DomainEvent
 from domain.exceptions import JobLeaseExpiredError, LLMTimeoutError, StructuredOutputError
 from domain.ports.repository_context import ContextRequest, FileExcerpt, RepositoryContext
@@ -122,6 +122,9 @@ class _Repo[TId, TEntity]:
 
 
 class _ProjectRepo(_Repo[ProjectId, Project]):
+    async def update_toolchain(self, project: Project) -> None:
+        self.items[project.id] = project
+
     async def get_by_name(self, name: str) -> Project | None:
         return next((p for p in self.items.values() if p.name == name), None)
 
@@ -142,12 +145,6 @@ class _RunRepo(_Repo[RunId, Run]):
     async def list_active(self) -> Sequence[Run]:
         return [r for r in self.items.values() if not r.status.is_terminal]
 
-    async def count_by_status(self) -> dict[RunStatus, int]:
-        counts: dict[RunStatus, int] = {}
-        for run in self.items.values():
-            counts[run.status] = counts.get(run.status, 0) + 1
-        return counts
-
 
 class _JobRepo(_Repo[JobId, Job]):
     async def find_by_idempotency_key(self, key: IdempotencyKey) -> Job | None:
@@ -155,14 +152,6 @@ class _JobRepo(_Repo[JobId, Job]):
 
     async def list_by_run(self, run_id: RunId) -> Sequence[Job]:
         return [j for j in self.items.values() if j.run_id == run_id]
-
-    async def list_by_status(self, status: JobStatus, *, limit: int = 100) -> Sequence[Job]:
-        return [j for j in self.items.values() if j.status is status][:limit]
-
-    async def list_expired_leases(self, *, now: datetime, limit: int = 100) -> Sequence[Job]:
-        return [j for j in self.items.values() if j.lease is not None and j.lease.is_expired(now)][
-            :limit
-        ]
 
 
 class _PlanRepo(_Repo[PlanId, Plan]):
@@ -190,10 +179,6 @@ class _ReviewRepo:
 
     async def list_by_candidate(self, candidate_id: CandidateId) -> Sequence[Review]:
         return [r for r in self.items if r.candidate_id == candidate_id]
-
-    async def latest_for_candidate(self, candidate_id: CandidateId) -> Review | None:
-        matches = await self.list_by_candidate(candidate_id)
-        return matches[-1] if matches else None
 
 
 class _ToolResultRepo:
@@ -337,9 +322,20 @@ class FakeJobQueue:
         self._clock = clock
         self._queued: list[Job] = []
         self._leased: dict[JobId, tuple[Job, Lease]] = {}
+        self.deferred: dict[JobId, datetime | None] = {}
+        """When each job was last asked to become claimable again.
+
+        Written by both `enqueue` and `release`, because the two together
+        are one requeue and it was the publication that silently cancelled
+        the delay in production. A double watching only `release` was blind
+        to exactly the bug worth catching.
+        """
+        self.deferred: dict[JobId, datetime | None] = {}
+        """When each released job was asked to become claimable again."""
         self.enqueued: list[JobId] = []
 
-    async def enqueue(self, job: Job) -> None:
+    async def enqueue(self, job: Job, *, not_before: datetime | None = None) -> None:
+        self.deferred[job.id] = not_before
         if any(j.id == job.id for j in self._queued) or job.id in self._leased:
             return  # at-least-once delivery must not duplicate work
         self._queued.append(job)
@@ -376,9 +372,23 @@ class FakeJobQueue:
     async def acknowledge(self, *, job_id: JobId, token: LeaseToken) -> None:
         self._leased.pop(job_id, None)
 
-    async def release(self, *, job_id: JobId, token: LeaseToken, requeue: bool) -> None:
+    async def release(
+        self,
+        *,
+        job_id: JobId,
+        token: LeaseToken,
+        requeue: bool,
+        not_before: datetime | None = None,
+    ) -> None:
         entry = self._leased.pop(job_id, None)
         if entry is not None and requeue:
+            # The delay is recorded, not honoured: these tests drive the
+            # orchestrator directly and have no clock to wait on. What they can
+            # assert is that the orchestrator *asked* for one, which is the part
+            # that was missing — the policy computed a delay and nothing passed
+            # it on. The two real adapters are held to the waiting itself by the
+            # queue contract suite.
+            self.deferred[job_id] = not_before
             self._queued.append(entry[0])
 
     async def reclaim_expired(self, *, now: datetime, limit: int = 100) -> Sequence[JobId]:
@@ -510,8 +520,18 @@ _DEFAULT_ANSWERS: dict[AgentRole, str] = {
         {
             "objective": "implement the objective",
             "tasks": [
-                {"key": "impl", "title": "Implement", "depends_on": []},
-                {"key": "test", "title": "Add tests", "depends_on": ["impl"]},
+                {
+                    "key": "impl",
+                    "title": "Implement",
+                    "depends_on": [],
+                    "target_paths": ["parser.py"],
+                },
+                {
+                    "key": "test",
+                    "title": "Add tests",
+                    "depends_on": ["impl"],
+                    "target_paths": ["tests/test_parser.py"],
+                },
             ],
             "assumptions": ["the build command is configured"],
             "constraints": [],
@@ -603,6 +623,10 @@ class FakeOutputCodec:
                     title=str(t["title"]),
                     description=str(t.get("description", "")),
                     depends_on=tuple(t.get("depends_on", ())),
+                    # Read because the real codec reads it and the orchestrator
+                    # uses it: a double that drops a field makes the wiring
+                    # that depends on it impossible to test.
+                    target_paths=tuple(t.get("target_paths", ())),
                 )
                 for t in payload.get("tasks", [])
             ),

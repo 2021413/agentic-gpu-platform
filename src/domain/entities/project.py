@@ -57,6 +57,20 @@ class Project:
         if not self.repository_url and not self.local_path:
             raise ValueError("a project needs either a repository_url or a local_path")
 
+    def replace_toolchain(self, toolchain: ToolchainConfig) -> None:
+        """Swap the commands, and only the commands.
+
+        The toolchain is the one part of a project that can legitimately be
+        corrected: it says *how* the same code is built and judged, and getting
+        it wrong costs a run that validated the wrong thing. Everything else is
+        identity. ``local_path`` and ``repository_url`` say *which* code is
+        worked on and ``default_branch`` says where the work lands, so editing
+        them in place would silently re-point the run history already attached
+        to this project at a different tree — the records would survive and
+        stop meaning anything. Those need a new project; this does not.
+        """
+        self.toolchain = toolchain
+
     @classmethod
     def create(
         cls,

@@ -19,11 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from domain.entities.candidate import Candidate
 from domain.entities.job import Job
 from domain.entities.plan import Plan
-from domain.entities.project import Project
+from domain.entities.project import Project, ToolchainConfig
 from domain.entities.review import Review
 from domain.entities.run import Run
-from domain.enums import FailureKind, JobStatus, JobType, ReviewVerdict, RunStatus
+from domain.enums import FailureKind, JobType, ReviewVerdict, RunStatus
 from domain.events.worker import WorkerRegistered
+from domain.exceptions import EntityNotFoundError
 from domain.value_objects.identifiers import CandidateId, IdempotencyKey, RunId, WorkerId
 from domain.value_objects.llm import TokenUsage
 from domain.value_objects.patch import Patch
@@ -66,6 +67,50 @@ async def test_project_is_readable_by_id_and_by_name(
         assert by_name.toolchain == project.toolchain
         assert await uow.projects.get_by_name("absent") is None
         assert list(await uow.projects.list_all()) == [project]
+
+
+async def test_correcting_a_toolchain_rewrites_one_column_of_the_same_row(
+    session_factory: Factory, project: Project
+) -> None:
+    """The toolchain already has a column, so correcting it needs no migration.
+
+    Checked against the server because that is the only thing that can prove
+    the JSON column really took the new commands, and that the identity the
+    project's runs were performed against — its path, branch, name and
+    creation time — was left exactly as it was.
+    """
+    async with unit(session_factory) as uow:
+        await uow.projects.add(project)
+        await uow.commit()
+
+    async with unit(session_factory) as uow:
+        stored = await uow.projects.get(project.id)
+        assert stored is not None
+        stored.replace_toolchain(ToolchainConfig(language="rust", test_command="cargo test"))
+        await uow.projects.update_toolchain(stored)
+        await uow.commit()
+
+    async with unit(session_factory) as uow:
+        reread = await uow.projects.get(project.id)
+        assert reread is not None
+        assert reread.toolchain.test_command == "cargo test"
+        assert reread.toolchain.build_command is None
+        assert reread.toolchain.language == "rust"
+        assert reread.name == project.name
+        assert reread.repository_url == project.repository_url
+        assert reread.local_path == project.local_path
+        assert reread.default_branch == project.default_branch
+        assert reread.created_at == project.created_at
+        # One row, not a second project silently inserted beside the first.
+        assert len(await uow.projects.list_all()) == 1
+
+
+async def test_correcting_the_toolchain_of_an_absent_project_is_refused(
+    session_factory: Factory, project: Project
+) -> None:
+    async with unit(session_factory) as uow:
+        with pytest.raises(EntityNotFoundError):
+            await uow.projects.update_toolchain(project)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +178,7 @@ async def test_a_replayed_idempotency_key_is_rejected_by_the_database(
         assert await uow.runs.get(duplicate.id) is None
 
 
-async def test_list_active_excludes_terminal_runs_and_counts_by_status(
+async def test_list_active_excludes_terminal_runs(
     session_factory: Factory, project: Project, new_run: Callable[..., Run], now: datetime
 ) -> None:
     planning = new_run()
@@ -153,10 +198,8 @@ async def test_list_active_excludes_terminal_runs_and_counts_by_status(
 
     async with unit(session_factory) as uow:
         active = await uow.runs.list_active()
-        counts = await uow.runs.count_by_status()
 
     assert {run.id for run in active} == {planning.id, fresh.id}
-    assert counts == {RunStatus.PLANNING: 1, RunStatus.CREATED: 1, RunStatus.COMPLETED: 1}
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +228,6 @@ async def test_job_round_trip_and_listings(
 
     async with unit(session_factory) as uow:
         stored = await uow.jobs.get(coding.id)
-        queued = await uow.jobs.list_by_status(JobStatus.PENDING)
         by_run = await uow.jobs.list_by_run(run.id)
         by_key = await uow.jobs.find_by_idempotency_key(IdempotencyKey("enqueue#1"))
 
@@ -194,57 +236,8 @@ async def test_job_round_trip_and_listings(
     assert stored.lease.token == lease.token
     assert stored.requirements == coding.requirements
     assert stored.payload == coding.payload
-    assert [job.id for job in queued] == [planning.id]
     assert {job.id for job in by_run} == {coding.id, planning.id}
     assert by_key is not None and by_key.id == coding.id
-
-
-async def test_list_expired_leases_returns_only_stuck_in_flight_jobs(
-    session_factory: Factory,
-    project: Project,
-    new_run: Callable[..., Run],
-    new_job: Callable[..., Job],
-    now: datetime,
-) -> None:
-    run = new_run()
-    await store_project_and_run(session_factory, project, run)
-
-    stuck = new_job(run=run)
-    stuck.enqueue(now)
-    stuck.lease_to(worker_id=WorkerId.generate(), now=now, duration=timedelta(minutes=1))
-
-    healthy = new_job(run=run)
-    healthy.enqueue(now)
-    healthy.lease_to(worker_id=WorkerId.generate(), now=now, duration=timedelta(hours=2))
-
-    waiting = new_job(run=run)
-    waiting.enqueue(now)
-
-    async with unit(session_factory) as uow:
-        for job in (stuck, healthy, waiting):
-            await uow.jobs.add(job)
-        await uow.commit()
-
-    later = now + timedelta(minutes=30)
-    async with unit(session_factory) as uow:
-        expired = await uow.jobs.list_expired_leases(now=later)
-
-    assert [job.id for job in expired] == [stuck.id]
-
-    # Reclaiming it is the domain's job; persisting the outcome is ours.
-    reclaimed = expired[0]
-    assert reclaimed.expire_lease(later) is True
-    async with unit(session_factory) as uow:
-        await uow.jobs.update(reclaimed)
-        await uow.commit()
-
-    async with unit(session_factory) as uow:
-        assert list(await uow.jobs.list_expired_leases(now=later)) == []
-        stored = await uow.jobs.get(stuck.id)
-
-    assert stored is not None
-    assert stored.status is JobStatus.FAILED
-    assert stored.lease is None
 
 
 async def test_a_replayed_job_idempotency_key_is_rejected(
@@ -359,10 +352,9 @@ async def test_reviews_are_listed_in_iteration_order(
 
     async with unit(session_factory) as uow:
         listed = await uow.reviews.list_by_candidate(candidate.id)
-        latest = await uow.reviews.latest_for_candidate(candidate.id)
 
     assert [review.iteration for review in listed] == [1, 2]
-    assert latest is not None
+    latest = listed[-1]
     assert latest.id == second.id
     assert latest.verdict is ReviewVerdict.FAIL
     assert len(latest.findings) == 2

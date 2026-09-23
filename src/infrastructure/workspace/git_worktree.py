@@ -20,9 +20,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import shutil
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from pathlib import Path
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, field
+from fnmatch import fnmatch
+from pathlib import Path, PurePosixPath
 
 from domain.entities.project import Project
 from domain.exceptions import WorkspaceError
@@ -41,6 +42,13 @@ class _Record:
     handle: WorkspaceHandle
     path: Path
     base_repository: Path
+    written: set[str] = field(default_factory=set)
+    """Paths the agent wrote on purpose.
+
+    Kept so the build-output exclusions can never drop them: a project whose
+    source genuinely lives under ``target/`` or ends in ``.log`` must not lose
+    work to a rule meant for compiler droppings.
+    """
 
 
 class GitWorktreeWorkspaceManager:
@@ -137,6 +145,9 @@ class GitWorktreeWorkspaceManager:
             "--no-ext-diff",
             "--find-renames",
             against,
+            "--",
+            ".",
+            *_exclusions_for(record.written),
             cwd=record.path,
         )
         return Patch.from_unified_diff(result.stdout, base_revision=against)
@@ -181,7 +192,19 @@ class GitWorktreeWorkspaceManager:
             raise WorkspaceError(f"{handle.role} workspaces are read-only", path=handle.path)
         # One thread hop for the whole batch: resolving and writing are both
         # blocking, and doing them one call at a time would pay the hop per file.
-        return await asyncio.to_thread(_write_all, Path(handle.path), files)
+        written = await asyncio.to_thread(_write_all, Path(handle.path), files)
+        if written:
+            record = self._record(handle)
+            # Remembered so the build-output exclusions can never drop them:
+            # a project whose source genuinely lives under `target/` or ends in
+            # `.log` must not lose work to a rule meant for compiler droppings.
+            record.written.update(written)
+            # --force so a path the project itself gitignores still counts as
+            # the agent's work when the agent chose to write it.
+            await self._git.run(
+                "add", "--force", "--intent-to-add", "--", *written, cwd=record.path
+            )
+        return written
 
     async def commit(self, handle: WorkspaceHandle, *, message: str) -> str:
         """Commit everything in the workspace and return the resulting revision.
@@ -446,6 +469,48 @@ def _resolve(path: Path) -> Path:
 def _remove_if_empty(path: Path) -> None:
     with contextlib.suppress(OSError):
         path.rmdir()
+
+
+# What a build leaves behind, in the languages this platform ships toolchains
+# for. Applied as pathspec exclusions when staging, rather than as an ignore
+# file: git reads `info/exclude` from the *common* git directory, which for a
+# linked worktree is the caller's own repository, and this must change nothing
+# there. Narrow on purpose — an over-broad rule silently drops real work, and
+# anything the agent writes explicitly is staged regardless.
+_BUILD_OUTPUT = (
+    "__pycache__/",
+    "*.py[cod]",
+    "*.o",
+    "*.a",
+    "*.so",
+    "*.obj",
+    "*.log",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "node_modules/",
+    "target/",
+    "build/",
+    "dist/",
+    "*.egg-info/",
+)
+
+
+def _exclusions_for(written: Collection[str]) -> tuple[str, ...]:
+    """Build-output exclusions, minus any rule that would swallow real work.
+
+    A pattern is dropped entirely when the agent deliberately wrote a file it
+    matches. Dropping the rule rather than re-including the path is what git
+    allows: an ``:(exclude)`` always wins over a positive pathspec, so a file
+    named back in would still be excluded.
+    """
+    keep: list[str] = []
+    for pattern in _BUILD_OUTPUT:
+        glob = pattern.rstrip("/") + "/*" if pattern.endswith("/") else pattern
+        if any(fnmatch(path, glob) or fnmatch(PurePosixPath(path).name, glob) for path in written):
+            continue
+        keep.append(f":(exclude){pattern}")
+    return tuple(keep)
 
 
 def _write_all(root: Path, files: Mapping[str, str]) -> tuple[str, ...]:

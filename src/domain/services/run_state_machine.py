@@ -24,7 +24,10 @@ _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     _S.PLAN_READY: frozenset({_S.CODING, _S.PLANNING, _S.FAILED}),
     _S.CODING: frozenset({_S.VALIDATING, _S.REVIEWING, _S.FAILED}),
     _S.VALIDATING: frozenset({_S.REVIEWING, _S.REPAIRING, _S.FAILED}),
-    _S.REVIEWING: frozenset({_S.COMPLETED, _S.REPAIRING, _S.FAILED}),
+    _S.REVIEWING: frozenset({_S.COMPLETED, _S.AWAITING_APPROVAL, _S.REPAIRING, _S.FAILED}),
+    # Rejection is feedback, not a verdict: the reviewer passed it and a
+    # human did not, and the coder is who can act on that.
+    _S.AWAITING_APPROVAL: frozenset({_S.COMPLETED, _S.REPAIRING, _S.CANCELLING, _S.FAILED}),
     _S.REPAIRING: frozenset({_S.CODING, _S.PLANNING, _S.FAILED}),
     _S.CANCELLING: frozenset({_S.CANCELLED, _S.FAILED}),
     _S.COMPLETED: frozenset(),

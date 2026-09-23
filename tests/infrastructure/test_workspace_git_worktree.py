@@ -490,3 +490,100 @@ async def test_a_read_only_workspace_refuses_writes(
 
     with pytest.raises(WorkspaceError, match="read-only"):
         await manager.write_files(planner, {"src/app.py": "nope\n"})
+
+
+# ---------------------------------------------------------------------------
+# Build artefacts.
+#
+# Validation runs the project's build, which writes. `git add --all` then
+# swept the result into the patch: a real run against a real model produced
+# six changed files, four of which were .pyc. Those reach the reviewer, cost
+# tokens, and land in the caller's repository on merge.
+# ---------------------------------------------------------------------------
+
+
+async def test_build_artefacts_stay_out_of_the_patch(
+    manager: GitWorktreeWorkspaceManager, project: Project
+) -> None:
+    handle = await writable_workspace(manager, project)
+    await manager.write_files(handle, {"src/app.py": "def main() -> int:\n    return 1\n"})
+
+    # What a build leaves behind, next to what the agent actually wrote.
+    root = Path(handle.path)
+    make_directory(root / "src" / "__pycache__")
+    (root / "src" / "__pycache__" / "app.cpython-312.pyc").write_bytes(b"\x00compiled")
+    make_directory(root / "target")
+    (root / "target" / "app.o").write_bytes(b"\x00object")
+    (root / "app.log").write_text("noise\n", encoding="utf-8")
+
+    patch = await manager.diff(handle)
+
+    assert "src/app.py" in patch.changed_paths
+    polluted = [p for p in patch.changed_paths if p != "src/app.py"]
+    assert not polluted, f"the patch carries build output: {polluted}"
+
+
+async def test_the_exclusions_do_not_touch_the_caller_s_repository(
+    manager: GitWorktreeWorkspaceManager, project: Project, repository: Path
+) -> None:
+    """They belong to the worktree, not to the project.
+
+    Writing a .gitignore would be a change the caller never asked for, and it
+    would show up in the very patch it is meant to keep clean.
+    """
+    await writable_workspace(manager, project)
+
+    assert not path_exists(repository / ".gitignore")
+    assert run_git(repository, "status", "--porcelain") == ""
+
+
+async def test_a_file_the_agent_deliberately_writes_is_never_excluded(
+    manager: GitWorktreeWorkspaceManager, project: Project
+) -> None:
+    """The rule must not silently drop work.
+
+    A project whose source genuinely lives under a matched name would lose it,
+    so an explicit write always wins over the exclusion.
+    """
+    handle = await writable_workspace(manager, project)
+
+    await manager.write_files(
+        handle,
+        {
+            "target/keep.py": "# deliberately written by the coder\n",
+            "logs/app.log": "written on purpose\n",
+        },
+    )
+
+    patch = await manager.diff(handle)
+    assert "target/keep.py" in patch.changed_paths, patch.changed_paths
+    assert "logs/app.log" in patch.changed_paths, patch.changed_paths
+
+
+async def test_a_project_with_a_gitignore_still_works(
+    manager: GitWorktreeWorkspaceManager, project: Project, repository: Path
+) -> None:
+    """The case the unit fixture did not have, and production did.
+
+    `git add --all -- <any pathspec>` exits 1 the moment a .gitignore covers a
+    file that is present, even though the staging it performed is correct. An
+    earlier version of the exclusions passed a pathspec there and took down
+    every run on any repository with a .gitignore — which is most of them.
+    """
+    (repository / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+    run_git(repository, "add", ".gitignore")
+    run_git(repository, "commit", "-m", "ignore build output")
+
+    handle = await writable_workspace(manager, project)
+    root = Path(handle.path)
+    make_directory(root / "__pycache__")
+    (root / "__pycache__" / "app.cpython-312.pyc").write_bytes(b"\x00compiled")
+
+    await manager.write_files(handle, {"src/app.py": "def main() -> int:\n    return 1\n"})
+
+    patch = await manager.diff(handle)
+    assert patch.changed_paths == ("src/app.py",), patch.changed_paths
+
+    # And the whole cycle must still complete, which is what actually broke.
+    revision = await manager.commit(handle, message="work")
+    assert revision

@@ -15,17 +15,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from application.ports import MetricsExposition
+from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
     ListProjectsUseCase,
+    ReplaceProjectToolchainUseCase,
+    UploadProjectUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
     CreateRunUseCase,
+    GetCandidatePatchUseCase,
     GetRunUseCase,
     ListCandidatesUseCase,
+    ListReviewsUseCase,
     ListRunEventsUseCase,
+    ListRunsUseCase,
 )
 from application.use_cases.workers import (
     DeregisterWorkerUseCase,
@@ -55,11 +62,17 @@ class ApiDependencies:
     create_project: CreateProjectUseCase
     get_project: GetProjectUseCase
     list_projects: ListProjectsUseCase
+    replace_project_toolchain: ReplaceProjectToolchainUseCase
+    upload_project: UploadProjectUseCase
     # runs
     create_run: CreateRunUseCase
     get_run: GetRunUseCase
     cancel_run: CancelRunUseCase
     list_candidates: ListCandidatesUseCase
+    list_runs: ListRunsUseCase
+    candidate_patch: GetCandidatePatchUseCase
+    list_reviews: ListReviewsUseCase
+    approve_run: ApproveRunUseCase
     list_run_events: ListRunEventsUseCase
     # workers
     list_workers: ListWorkersUseCase
@@ -69,5 +82,7 @@ class ApiDependencies:
     deregister_worker: DeregisterWorkerUseCase
     # ports and probes
     event_bus: EventBus
+    metrics: MetricsExposition | None
+    """The registry the exposition renders, or None when disabled."""
     readiness: ReadinessProbe
     service_authenticator: ServiceAuthenticator

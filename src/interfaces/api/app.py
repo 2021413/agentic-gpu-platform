@@ -25,14 +25,16 @@ Or, when the container is only available later (lazy adapters, lifespan):
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from interfaces.api.dependencies.container import ApiDependencies
 from interfaces.api.errors import DEFAULT_PROBLEM_BASE_URI, install_error_handlers
 from interfaces.api.middleware.correlation import RequestContextMiddleware
-from interfaces.api.routes import events, health, projects, runs, workers
+from interfaces.api.routes import events, health, metrics, projects, runs, workers
 from interfaces.worker_api.routes import router as worker_router
 
 __all__ = ["create_api"]
@@ -52,6 +54,7 @@ def create_api(
     version: str = "1.0.0",
     problem_base_uri: str = DEFAULT_PROBLEM_BASE_URI,
     include_internal_api: bool = True,
+    allowed_origins: Sequence[str] = (),
     lifespan: Any = None,
 ) -> FastAPI:
     """Build the ASGI application.
@@ -60,6 +63,11 @@ def create_api(
     deployed on its own port or its own ingress, reachable from the cluster but
     not from the internet. Serving it from the same process is the local and
     single-node default, not an architectural assumption.
+
+    ``allowed_origins`` opens the API to a browser. Empty by default and
+    deliberately so: an API that answers any origin with credentials is an API
+    that anybody's page can drive on a logged-in user's behalf. A viewer is
+    opt-in.
 
     ``lifespan`` is passed straight through: startup and shutdown (pools,
     background reapers) belong to the composition root, which is the only place
@@ -78,9 +86,22 @@ def create_api(
     # fail, including the error handlers that quote it in a problem document.
     app.add_middleware(RequestContextMiddleware)
 
+    origins = [origin for origin in allowed_origins if origin]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["content-type", "authorization", "idempotency-key", "last-event-id"],
+            # The viewer resumes an interrupted run stream from this.
+            expose_headers=["x-request-id"],
+        )
+
     install_error_handlers(app, problem_base_uri=problem_base_uri)
 
     app.include_router(health.router)
+    app.include_router(metrics.router)
     app.include_router(projects.router)
     app.include_router(runs.projects_router)
     app.include_router(runs.router)

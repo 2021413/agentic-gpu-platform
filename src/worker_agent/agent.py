@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from domain.enums import AgentRole, WorkerStatus
@@ -108,7 +108,8 @@ class WorkerAgent:
             )
 
         self._status = WorkerStatus.REGISTERING
-        body = await self._client.register(self._description.as_payload())
+        description = await self._reconcile_with_the_engine()
+        body = await self._client.register(description.as_payload())
         worker_id = str(body.get("id") or self._description.worker_id or "")
         if not worker_id:
             raise ControlPlaneError("the control plane did not return a worker id")
@@ -116,6 +117,43 @@ class WorkerAgent:
         self._status = WorkerStatus.READY
         _log.info("registered as worker %s (model %s)", worker_id, self._description.model_id)
         return worker_id
+
+    async def _reconcile_with_the_engine(self) -> WorkerDescription:
+        """Advertise what the engine serves, not what this process was told.
+
+        The declared length comes from settings and defaults to the model's
+        native context; the engine is started with its own MAX_MODEL_LEN.
+        Nothing reconciled the two, so the control plane scheduled prompts that
+        the engine answers with a 400. Asking it is one HTTP call at startup.
+
+        An engine that does not report a length leaves the declared value
+        alone: an unknown is not a reason to invent a smaller number.
+        """
+        changes: dict[str, Any] = {}
+
+        length = await self._probe.served_context_length()
+        if length is not None and length != self._description.context_length:
+            _log.warning(
+                "declared context length %d, but the engine serves %d; advertising the latter",
+                self._description.context_length,
+                length,
+            )
+            changes["context_length"] = length
+
+        model_id = await self._probe.served_model_id()
+        if model_id is not None and model_id != self._description.model_id:
+            # The control plane sends this name verbatim and the engine refuses
+            # any other, so a mismatch is a 404 on every single call.
+            _log.warning(
+                "declared model %r, but the engine serves %r; advertising the latter",
+                self._description.model_id,
+                model_id,
+            )
+            changes["model_id"] = model_id
+
+        if changes:
+            self._description = replace(self._description, **changes)
+        return self._description
 
     async def beat_once(self) -> bool:
         """Send one heartbeat. Returns False when the beat could not be delivered.

@@ -15,10 +15,12 @@ Two rules shape everything here:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Final
 
 from application.dto.agent_io import CodeDraft, PlanDraft, ReviewDraft, format_findings
 from application.orchestration.agents import CoderAgent, PlannerAgent, ReviewerAgent
@@ -40,12 +42,15 @@ from domain.enums import (
     ReviewVerdict,
     RunStatus,
 )
+from domain.events.run import RepositoryContextSelected
 from domain.exceptions import (
     DomainError,
     EntityNotFoundError,
     InferenceError,
     LLMTimeoutError,
     NoCompatibleWorkerError,
+    OutputTruncatedError,
+    RunNotModifiableError,
     StructuredOutputError,
     ToolExecutionError,
     WorkspaceError,
@@ -54,7 +59,11 @@ from domain.ports.clock import Clock, IdGenerator
 from domain.ports.event_bus import EventBus
 from domain.ports.job_queue import JobQueue
 from domain.ports.repositories import UnitOfWork
-from domain.ports.repository_context import ContextRequest, RepositoryContextProvider
+from domain.ports.repository_context import (
+    ContextRequest,
+    RepositoryContext,
+    RepositoryContextProvider,
+)
 from domain.ports.workspace import WorkspaceManager
 from domain.services.candidate_selection import DeterministicCandidateSelectionPolicy
 from domain.services.retry_policy import RetryPolicy
@@ -73,7 +82,7 @@ from domain.value_objects.validation import ValidationReport
 from domain.value_objects.worker import JobRequirements
 from domain.value_objects.workspace import WorkspaceHandle, WorkspaceRole
 
-__all__ = ["OrchestratorConfig", "RunOrchestrator"]
+__all__ = ["OrchestratorConfig", "RunOrchestrator", "diagnose_broken_module"]
 
 _log = logging.getLogger(__name__)
 
@@ -100,9 +109,60 @@ class OrchestratorConfig:
     job_max_attempts: int = 3
     context_max_files: int = 40
     context_max_tokens: int = 24_000
+    """Ceiling on the repository view. The fleet lowers it; nothing raises it."""
+    prompt_overhead_tokens: int = 2_048
+    """Room kept in the window for the prompt that is not the repository view.
+
+    The fleet reports how large a *prompt* it can take. That number was handed
+    straight to the context provider as the budget for the code excerpt, which
+    silently assumed the excerpt was the whole prompt. It is not: the system
+    instructions, the objective, the plan, the accumulated review findings and
+    the JSON schema all ride in the same window and none of them were counted.
+
+    The first real run against a 32768-token engine failed by exactly one token:
+
+        maximum context length is 32768 tokens. However, you requested 4096
+        output tokens and your prompt contains at least 28673 input tokens
+
+    28672 is 32768 - 4096 to the token. The excerpt had been packed to fill the
+    entire prompt budget, and the template pushed it over. Off by one, but the
+    cost is a whole cold GPU and a run that reaches the coder and dies.
+
+    A fixed allowance rather than a measurement, because the request is sized
+    before the prompt is rendered. It is deliberately generous: over-reserving
+    costs a few files of context, under-reserving costs the run.
+    """
+    reserved_output_tokens: int = 4_096
+    """Room kept in the window for the answer.
+
+    Sized for the coder, which is the only role that writes whole files back —
+    a diff of a few lines costs a fraction of this, a rewritten module does
+    not. Too small and the reply is truncated mid-JSON, which reaches the
+    repair loop as malformed JSON rather than as "you ran out of room".
+    """
+    def excerpt_budget(self, fleet_budget: int | None) -> int:
+        """How many tokens of repository the prompt may carry.
+
+        `fleet_budget` is room for the WHOLE prompt, so the part of the prompt
+        that is not code has to come out of it first. The fleet only ever
+        lowers the configured ceiling: an empty fleet leaves it alone, because
+        there is nothing to learn from and guessing is what caused the
+        24000-against-16384 mismatch in the first place.
+        """
+        if fleet_budget is None:
+            return self.context_max_tokens
+        return min(self.context_max_tokens, max(0, fleet_budget - self.prompt_overhead_tokens))
+
     validation_timeout_seconds: float = 900.0
     static_analysis_is_blocking: bool = False
     integrate_on_success: bool = True
+    require_approval: bool = False
+    """Hold a reviewed run until a human lets it land.
+
+    Off by default, and deliberately so: integration writes into someone else's
+    repository, but a run waiting on an approval nobody is watching is a run
+    that never finishes. Turning this on is a statement that somebody is.
+    """
 
 
 class RunOrchestrator:
@@ -207,20 +267,93 @@ class RunOrchestrator:
             await commit_and_publish(uow, self._bus)
         await self._workspaces.release_run(job.run_id)
 
-    async def start_pending_runs(self) -> Sequence[RunId]:
-        """Start runs that were created but never scheduled.
+    async def advance_stalled_runs(self) -> Sequence[RunId]:
+        """Push along every run that has stopped without finishing.
 
-        Creating a run and scheduling it are two different things, and the HTTP
-        layer only does the first: it persists the run and answers, so a client
-        is never left waiting on a GPU. This sweep is what makes the second
-        happen, and it is idempotent — ``_advance`` ignores anything already
-        under way.
+        Two shapes, one cause: ``_advance`` runs exactly once, when a job ends.
+
+        A run created over HTTP was never advanced at all — the API persists it
+        and answers rather than holding a client on a GPU, and nothing did the
+        second half. And a run whose last job finished could miss its one call
+        to ``_advance`` — a restart, a crash, a lost race with the job's own
+        status write — after which nothing would ever call it again. That one
+        was seen on a real stack: every job SUCCEEDED, the candidate validated,
+        the review PASS, and the run sat in REVIEWING with no error anywhere.
+
+        Idempotent by construction: a run with a job still in flight is skipped,
+        so a sweep can never hand the same candidate to a second worker.
         """
         async with self._uow_factory() as uow:
-            pending = [r.id for r in await uow.runs.list_active() if r.status is RunStatus.CREATED]
-        for run_id in pending:
-            await self._advance(run_id)
-        return pending
+            stalled: list[RunId] = []
+            for run in await uow.runs.list_active():
+                if run.is_terminal or run.is_cancelling:
+                    continue
+                if run.status is RunStatus.CREATED:
+                    stalled.append(run.id)
+                    continue
+                jobs = await uow.jobs.list_by_run(run.id)
+                # No jobs at all is not "stalled": the run is between states
+                # inside a transaction that has not committed yet.
+                if jobs and not _has_unfinished(list(jobs)):
+                    stalled.append(run.id)
+        return await self._advance_each(stalled, what="advance")
+
+    async def approve(self, run_id: RunId) -> Run:
+        """Let the selected patch land. The write nobody could undo automatically."""
+        async with self._coordinator.lock(run_id), self._uow_factory() as uow:
+            run = await self._require_run(uow, run_id)
+            if run.status is not RunStatus.AWAITING_APPROVAL:
+                raise RunNotModifiableError(run_id, run.status)
+            project = await self._require_project(uow, run)
+            candidates = list(await uow.candidates.list_by_run(run_id))
+            winner = next((c for c in candidates if c.id == run.selected_candidate_id), None)
+            if winner is None:
+                raise DomainError("the run has no selected candidate", run_id=str(run_id))
+
+            now = self._clock.now()
+            if self._config.integrate_on_success:
+                await self._integrate(project=project, run=run, candidate=winner)
+            for loser in candidates:
+                if loser.id != winner.id:
+                    loser.reject(now=now, reason="another candidate was approved")
+                    await uow.candidates.update(loser)
+            winner.select(now)
+            await uow.candidates.update(winner)
+            run.complete(now=now, candidate_id=winner.id)
+            await self._workspaces.release_run(run.id)
+            await uow.runs.update(run)
+            uow.collect(run, *candidates)
+            await commit_and_publish(uow, self._bus)
+            return run
+
+    async def reject(self, run_id: RunId, *, reason: str) -> Run:
+        """Refuse the patch and send the reason back to the coder.
+
+        A refusal is feedback, not a verdict: the reviewer passed it and a human
+        did not, and the coder is the one who can act on the difference. When
+        the repair budget is spent the run fails, carrying the human's reason
+        rather than a generic one.
+        """
+        follow_ups: list[Job] = []
+        async with self._coordinator.lock(run_id), self._uow_factory() as uow:
+            run = await self._require_run(uow, run_id)
+            if run.status is not RunStatus.AWAITING_APPROVAL:
+                raise RunNotModifiableError(run_id, run.status)
+            candidates = list(await uow.candidates.list_by_run(run_id))
+            now = self._clock.now()
+            run.reject_approval(now=now, reason=reason)
+
+            target = [c for c in candidates if c.id == run.selected_candidate_id] or candidates
+            follow_ups = await self._repair_or_fail(
+                uow=uow, run=run, candidates=target, reason=f"rejected by a human: {reason}"
+            )
+            await self._persist_jobs(uow, follow_ups)
+            await uow.runs.update(run)
+            uow.collect(run, *candidates)
+            await commit_and_publish(uow, self._bus)
+            approved = run
+        await self._publish_jobs(follow_ups)
+        return approved
 
     async def resume_active_runs(self) -> Sequence[RunId]:
         """Re-schedule work for runs left in flight by an orchestrator restart.
@@ -231,9 +364,49 @@ class RunOrchestrator:
         async with self._uow_factory() as uow:
             runs = await uow.runs.list_active()
             run_ids = [run.id for run in runs]
+        return await self._advance_each(run_ids, what="resume after a restart")
+
+    async def _advance_each(self, run_ids: Sequence[RunId], *, what: str) -> Sequence[RunId]:
+        """Advance many runs, letting no single one take down the caller.
+
+        Both callers sweep every active run: one at startup, one on a timer.
+        Without this isolation a single unrecoverable row — a workspace the
+        restart destroyed, say — raised out of startup and put the whole
+        control plane in a crash loop, serving nothing and advancing nothing.
+
+        A run that cannot be advanced is failed rather than left active, or it
+        would be retried on every boot forever while still reading as in-flight
+        to anyone asking the API.
+        """
+        advanced: list[RunId] = []
         for run_id in run_ids:
-            await self._advance(run_id)
-        return run_ids
+            try:
+                await self._advance(run_id)
+            except Exception as exc:
+                _log.exception("could not %s run %s; failing it", what, run_id)
+                await self._fail_unrecoverable(run_id, what=what, exc=exc)
+                continue
+            advanced.append(run_id)
+        return advanced
+
+    async def _fail_unrecoverable(self, run_id: RunId, *, what: str, exc: Exception) -> None:
+        """Record why a run can never continue. Best effort, and silent if even
+        that fails: the caller is a startup path and must still come up."""
+        with contextlib.suppress(Exception):
+            async with self._coordinator.lock(run_id), self._uow_factory() as uow:
+                run = await uow.runs.get(run_id)
+                if run is None or run.is_terminal:
+                    return
+                run.fail(
+                    now=self._clock.now(),
+                    kind=_classify(exc),
+                    reason=f"could not {what} this run: {exc}",
+                )
+                await uow.runs.update(run)
+                uow.collect(run)
+                await commit_and_publish(uow, self._bus)
+        with contextlib.suppress(Exception):
+            await self._workspaces.release_run(run_id)
 
     # ------------------------------------------------------------------
     # job dispatch
@@ -270,12 +443,13 @@ class RunOrchestrator:
             project=project, run_id=run.id, role=WorkspaceRole.PLANNER
         )
         try:
-            context = await self._context.build(
-                workspace=workspace, request=self._context_request(run.objective)
+            context = await self._build_context(
+                workspace=workspace, run=run, role=AgentRole.PLANNER
             )
             requirements = JobRequirements(
                 role=AgentRole.PLANNER,
                 estimated_prompt_tokens=context.estimated_tokens,
+                reserved_output_tokens=self._config.reserved_output_tokens,
             )
             async with self._pool.acquire(requirements) as acquired:
                 outcome = await self._planner.plan(
@@ -328,17 +502,27 @@ class RunOrchestrator:
             candidate = await self._require_candidate(uow, candidate_id)
             plan = await uow.plans.latest_for_run(run.id)
             reviews = await uow.reviews.list_by_candidate(candidate_id)
+            evidence = list(await uow.tool_results.list_by_candidate(candidate_id))
 
         workspace = await self._require_workspace(candidate)
-        context = await self._context.build(
-            workspace=workspace, request=self._context_request(run.objective)
+        context = await self._build_context(
+            workspace=workspace,
+            run=run,
+            role=AgentRole.CODER,
+            candidate_id=candidate_id,
+            # On a repair, the files this candidate already touched are put in
+            # front of it rather than searched for. Whether a term from the
+            # objective happens to match the file it wrote is luck, and a coder
+            # asked to fix code it cannot see rewrites it from scratch.
+            paths=_files_to_put_in_front_of_the_coder(candidate, plan),
         )
-        repair_brief = reviews[-1].repair_brief() if reviews else None
+        repair_brief = accumulated_repair_brief(reviews)
 
         requirements = JobRequirements(
             role=AgentRole.CODER,
             estimated_prompt_tokens=context.estimated_tokens,
             requires_tools=True,
+            reserved_output_tokens=self._config.reserved_output_tokens,
         )
         async with self._pool.acquire(requirements) as acquired:
             outcome = await self._coder.code(
@@ -349,6 +533,7 @@ class RunOrchestrator:
                 context=context,
                 plan=plan,
                 repair_brief=repair_brief,
+                tool_output=_recent_tool_evidence(evidence),
             )
             worker_id = acquired.worker.id
 
@@ -455,7 +640,10 @@ class RunOrchestrator:
             plan = await uow.plans.latest_for_run(run.id)
             previous = await uow.reviews.list_by_candidate(candidate_id)
 
-        requirements = JobRequirements(role=AgentRole.REVIEWER)
+        requirements = JobRequirements(
+            role=AgentRole.REVIEWER,
+            reserved_output_tokens=self._config.reserved_output_tokens,
+        )
         async with self._pool.acquire(requirements) as acquired:
             outcome = await self._reviewer.review(
                 provider=acquired.provider,
@@ -624,6 +812,12 @@ class RunOrchestrator:
         if passed:
             selection = self._selection.select(passed)
             winner = selection.winner or passed[0]
+            if self._config.require_approval:
+                # Stop before the write. Losing candidates are left alone: the
+                # human may reject this one, and the others are the alternatives.
+                run.select_candidate(candidate_id=winner.id, rationale=selection.rationale, now=now)
+                run.await_approval(candidate_id=winner.id, now=now)
+                return []
             if self._config.integrate_on_success:
                 await self._integrate(project=project, run=run, candidate=winner)
             for loser in candidates:
@@ -690,6 +884,7 @@ class RunOrchestrator:
         _log.warning("job %s (%s) failed: %s -> %s", job.id, job.type, exc, decision.action)
 
         now = self._clock.now()
+        deferred_until = (now + decision.delay) if decision.delay else None
         async with self._uow_factory() as uow:
             run = await uow.runs.get(job.run_id)
             retryable = decision.should_retry_job
@@ -708,8 +903,15 @@ class RunOrchestrator:
             uow.collect(job)
             await commit_and_publish(uow, self._bus)
 
+        # The policy computes a delay and, until now, nothing honoured it. With
+        # a single-worker fleet — which scale-to-zero makes ordinary — an
+        # immediate requeue means the next attempt asks the same empty pool the
+        # same question: a real run spent all three attempts in four seconds.
         await self._queue.release(
-            job_id=job.id, token=lease.token, requeue=decision.should_retry_job
+            job_id=job.id,
+            token=lease.token,
+            requeue=decision.should_retry_job,
+            not_before=deferred_until,
         )
         if decision.should_retry_job:
             async with self._uow_factory() as uow:
@@ -719,7 +921,10 @@ class RunOrchestrator:
                     await uow.jobs.update(stored)
                     uow.collect(stored)
                     await commit_and_publish(uow, self._bus)
-                    await self._queue.enqueue(stored)
+                    # Same instant as the release above: the two calls are one
+                    # requeue, and disagreeing about the delay means the second
+                    # silently cancels the first.
+                    await self._queue.enqueue(stored, not_before=deferred_until)
         else:
             await self._advance(job.run_id)
 
@@ -859,11 +1064,75 @@ class RunOrchestrator:
         for job in jobs:
             await self._queue.enqueue(job)
 
-    def _context_request(self, objective: str) -> ContextRequest:
+    async def _build_context(
+        self,
+        *,
+        workspace: WorkspaceHandle,
+        run: Run,
+        role: AgentRole,
+        candidate_id: object = None,
+        paths: Sequence[str] = (),
+    ) -> RepositoryContext:
+        """Build the view of the repository, and record what it contained.
+
+        The manifest is published rather than kept: it is evidence about one
+        inference, it reaches the live run stream so a viewer sees the
+        selection while the run is still going, and it lands in the audit log
+        for afterwards. An empty selection — the defect that had every agent
+        inventing code from a filename list — shows up here as no files at all.
+        """
+        request = await self._context_request(run.objective, role=role, paths=paths)
+        context = await self._context.build(workspace=workspace, request=request)
+        event = RepositoryContextSelected(
+            occurred_at=self._clock.now(),
+            run_id=run.id,
+            role=role,
+            candidate_id=candidate_id,  # type: ignore[arg-type]
+            files={e.path: e.estimated_tokens for e in context.excerpts},
+            tree=tuple(context.file_tree),
+            notes=tuple(context.notes),
+            estimated_tokens=context.estimated_tokens,
+            budget_tokens=request.max_tokens,
+        )
+        # Appended *and* published. Publishing alone reaches whoever is
+        # watching right now and nothing else: the durable log is written by
+        # the unit of work, so a live-only event vanishes from the replay and
+        # a viewer that opens the run afterwards sees no manifest at all.
+        async with self._uow_factory() as uow:
+            await uow.events.append([event])
+            await uow.commit()
+        await self._bus.publish([event])
+        return context
+
+    async def _context_request(
+        self, objective: str, *, role: AgentRole, paths: Sequence[str] = ()
+    ) -> ContextRequest:
+        """Size the repository view against what the fleet can actually hold.
+
+        The configured ceiling was 24000 while the engines were served with
+        MAX_MODEL_LEN=16384: the orchestrator asked for a view no worker could
+        take, and the scheduler — which does check — would have refused the job
+        the moment the context stopped being empty. Two numbers that had to
+        agree, in two packages that never spoke.
+
+        The fleet only ever lowers the ceiling. An empty fleet leaves it alone:
+        there is nothing to learn from, and guessing is what caused this.
+        """
+        budget = await self._pool.prompt_budget(
+            JobRequirements(role=role, reserved_output_tokens=self._config.reserved_output_tokens)
+        )
+        max_tokens = self._config.excerpt_budget(budget)
+        if max_tokens != self._config.context_max_tokens:
+            _log.debug(
+                "context budget lowered from %d to %d by the fleet's context window",
+                self._config.context_max_tokens,
+                max_tokens,
+            )
         return ContextRequest(
             objective=objective,
+            paths=tuple(paths),
             max_files=self._config.context_max_files,
-            max_tokens=self._config.context_max_tokens,
+            max_tokens=max_tokens,
         )
 
     async def _require_workspace(self, candidate: Candidate) -> WorkspaceHandle:
@@ -932,18 +1201,164 @@ def _next_stage(project: Project, report: ValidationReport) -> JobType | None:
     return None
 
 
+# Order matters: the first match wins, so a subclass must come before its base.
+# OutputTruncatedError is a StructuredOutputError and must not be classified as
+# one — re-asking a truncated answer reproduces the truncation exactly.
+_FAILURE_KINDS: Final[tuple[tuple[type[Exception], FailureKind], ...]] = (
+    (OutputTruncatedError, FailureKind.OUTPUT_TRUNCATED),
+    (StructuredOutputError, FailureKind.INVALID_STRUCTURED_OUTPUT),
+    (LLMTimeoutError, FailureKind.INFERENCE),
+    (InferenceError, FailureKind.INFERENCE),
+    (NoCompatibleWorkerError, FailureKind.NO_WORKER),
+    (ToolExecutionError, FailureKind.TOOL),
+    (WorkspaceError, FailureKind.INFRASTRUCTURE),
+)
+
+
+def _files_to_put_in_front_of_the_coder(
+    candidate: Candidate, plan: Plan | None, *, limit: int = 12
+) -> tuple[str, ...]:
+    """Files this coder should not have to go looking for.
+
+    Its own changes first, because a repair it cannot see turns into a rewrite.
+    Then whatever the planner named: each task carries ``target_paths``, which
+    is the planner saying plainly where the work belongs, and nothing read
+    them — the first attempt searched for words from the objective and found
+    the right file only when one happened to match.
+
+    Bounded, because these are added on top of the search rather than instead
+    of it, and the token budget is shared.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for path in candidate.patch.changed_paths if candidate.patch else ():
+        if path not in seen:
+            seen.add(path)
+            ordered.append(path)
+    for task in plan.tasks if plan is not None else ():
+        for path in task.target_paths:
+            if path not in seen:
+                seen.add(path)
+                ordered.append(path)
+    return tuple(ordered[:limit])
+
+
+def accumulated_repair_brief(reviews: Sequence[Review]) -> str | None:
+    """Every objection still on the table, with how often it was raised.
+
+    The coder used to receive only the newest review while the reviewer
+    received the whole history. A real run had the same objection raised in
+    four consecutive rounds, worded identically each time, with nothing to
+    tell the coder it was the fourth — so it kept changing other things.
+
+    ``None`` when no review exists, which is a different thing from an empty
+    brief and is what the prompt distinguishes.
+    """
+    if not reviews:
+        return None
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for review in reviews:
+        for line in review.repair_brief().splitlines():
+            if not line.strip():
+                continue
+            if line not in counts:
+                order.append(line)
+            counts[line] = counts.get(line, 0) + 1
+    if not order:
+        return None
+    return "\n".join(
+        line if counts[line] == 1 else f"{line}  [raised {counts[line]} times; still not fixed]"
+        for line in order
+    )
+
+
+# Pytest says these when a test module could not be imported at all. They are
+# not failing tests: nothing ran. The distinction matters because the two need
+# opposite reactions from the coder, and the output looks similar enough that a
+# model reading a truncated traceback treats them the same.
+_COLLECTION_FAILURES: tuple[str, ...] = (
+    "ERROR collecting",
+    "ImportError while importing test module",
+    "errors during collection",
+    "INTERNALERROR",
+)
+
+# The exception families that mean the file itself is broken rather than wrong.
+_IMPORT_TIME_ERRORS: tuple[str, ...] = (
+    "SyntaxError",
+    "IndentationError",
+    "ModuleNotFoundError",
+    "ImportError",
+    "NameError",
+    "AttributeError",
+    "PydanticUserError",
+)
+
+
+def diagnose_broken_module(output: str) -> str | None:
+    """Say plainly when the code no longer loads, rather than leaving it in a trace.
+
+    A real run died here. The coder was asked for a ten-line validator in a
+    357-line module, wrote the four correct lines, and then rewrote an
+    unrelated class from memory — dropping fields that existed and adding a
+    decorator referencing one it had not declared. The module stopped
+    importing, so every test failed at collection, and all three repair rounds
+    received the same traceback and rewrote the same whole file again.
+
+    Nothing in that output said "you broke the file". It said `PydanticUserError`
+    at the end of twenty frames of pytest internals, under a heading that reads
+    like a test failure. This turns it into a sentence, at the top, where a
+    model that skims will still see it.
+
+    ``None`` when the output is an ordinary failure, because a warning that
+    fires on everything is a warning nobody reads.
+    """
+    if not output:
+        return None
+    collecting = any(marker in output for marker in _COLLECTION_FAILURES)
+    import_time = any(error in output for error in _IMPORT_TIME_ERRORS)
+    if not (collecting and import_time):
+        return None
+    return (
+        "THE CODE NO LONGER LOADS. This is not a failing test: nothing ran at "
+        "all, because importing the module raised. Every other failure below is "
+        "a consequence of this one and will disappear when it does.\n"
+        "Repair the file you last edited before changing anything else, and "
+        "check whether you rewrote code you were not asked to touch — a class "
+        "or function that has lost members it used to have is the usual cause."
+    )
+
+
+def _recent_tool_evidence(results: Sequence[ToolResult], *, limit: int = 3) -> str:
+    """What the deterministic tools said, for the agent that can act on it.
+
+    The reviewer has always received this and cannot change a line; the coder
+    never did and is the only thing that can. Three real runs spent their whole
+    repair budget re-deriving the same code because nothing told them what
+    failed.
+
+    Failures first and most recent first: a build that broke before the tests
+    ran explains more than a test that never got the chance. An empty string
+    when nothing has run yet, because inventing evidence is worse than none.
+    """
+    failures = [r for r in reversed(results) if not r.succeeded]
+    chosen = failures[:limit] or list(reversed(results))[:1]
+    evidence = "\n\n".join(f"$ {r.command}\nexit={r.exit_code}\n{r.tail(2000)}" for r in chosen)
+    diagnosis = diagnose_broken_module(evidence)
+    return f"{diagnosis}\n\n{evidence}" if diagnosis else evidence
+
+
 def _classify(exc: Exception) -> FailureKind:
-    """Map an exception to the failure kind the retry policy branches on."""
-    if isinstance(exc, StructuredOutputError):
-        return FailureKind.INVALID_STRUCTURED_OUTPUT
-    if isinstance(exc, LLMTimeoutError | InferenceError):
-        return FailureKind.INFERENCE
-    if isinstance(exc, NoCompatibleWorkerError):
-        return FailureKind.INFRASTRUCTURE
-    if isinstance(exc, ToolExecutionError):
-        return FailureKind.TOOL
-    if isinstance(exc, WorkspaceError):
-        return FailureKind.INFRASTRUCTURE
+    """Map an exception to the failure kind the retry policy branches on.
+
+    Anything unrecognised is infrastructure: the safe assumption is that the
+    machine failed, which is retried on another worker, rather than that the
+    model did, which would send an unrelated error into the repair loop.
+    """
+    for error_type, kind in _FAILURE_KINDS:
+        if isinstance(exc, error_type):
+            return kind
     return FailureKind.INFRASTRUCTURE
 
 

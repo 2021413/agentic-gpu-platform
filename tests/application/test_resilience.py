@@ -77,6 +77,40 @@ async def test_an_empty_pool_does_not_fail_the_run_immediately(platform: Platfor
     assert platform.queue.pending == 1, "the job must be waiting for a worker, not lost"
 
 
+async def test_an_empty_pool_is_asked_again_later_not_immediately(
+    platform: Platform, project
+):
+    """The retry policy computes a backoff and, until this, nothing carried it.
+
+    With one worker — which scale-to-zero makes the ordinary case — an immediate
+    requeue puts the same question to the same empty pool. A real run spent all
+    three of its attempts in four seconds that way, having already planned,
+    coded, built and tested two candidates, and died on an absence that lasted
+    under a minute.
+    """
+    view = await create_run(platform, project)
+    await platform.orchestrator.start(view.id)
+
+    await platform.executor.run_once()
+
+    deferred = [when for when in platform.queue.deferred.values() if when is not None]
+    assert deferred, "the job went straight back on the queue with no delay"
+
+
+async def test_a_retry_that_is_worth_making_now_is_not_delayed(
+    platform: Platform, project
+):
+    """The delay is opt-in per failure kind. A decision that carries none must
+    still requeue immediately, or every retry pays for this one."""
+    await platform.add_worker()
+    view = await create_run(platform, project)
+    await platform.orchestrator.start(view.id)
+
+    await platform.executor.run_once()
+
+    assert all(when is None for when in platform.queue.deferred.values())
+
+
 async def test_a_run_fails_cleanly_once_the_retry_budget_is_spent(platform: Platform, project):
     view = await create_run(platform, project)
     await platform.orchestrator.start(view.id)

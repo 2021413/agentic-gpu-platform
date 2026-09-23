@@ -1,0 +1,767 @@
+/*
+ * The viewer's design system.
+ *
+ * This is an instrument panel, not a dashboard. It is read next to a terminal,
+ * often for twenty minutes at a stretch, while something expensive is running.
+ * Four rules follow from that, and every choice below is one of them:
+ *
+ *   1. Numbers must not dance. Everything that changes live is tabular and
+ *      monospaced, so a digit changing does not reflow the line beside it.
+ *   2. Colour means state, never decoration. A screen with six green things on
+ *      it should mean six things are fine, not that green was available.
+ *   3. Alignment does the work that borders and shadows would otherwise do.
+ *      One hairline, one radius, no elevation.
+ *   4. Motion only where it carries information — the stream indicator, and
+ *      nothing else. Anything else is noise in the corner of the eye.
+ */
+
+/* ── tokens ──────────────────────────────────────────────────────────── */
+:root {
+  /* A cold near-black with a trace of blue, so the accent has somewhere to sit
+     and the whole surface does not read as pure grey next to a terminal. */
+  --bg:        #0a0d11;
+  --surface:   #11151b;
+  --raised:    #171c23;
+  --line:      #222932;
+  --line-soft: #1a2027;
+
+  --text:      #dde3ea;
+  --text-dim:  #8d98a6;
+  --text-faint:#5d6773;
+
+  --accent:    #4cc2d4;
+  --ok:        #4ea96b;
+  --bad:       #e05561;
+  --warn:      #cf9a3f;
+  --hold:      #9b7ad6;
+  --info:      #4cc2d4;
+
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* One 4px grid. Named so a stray 7px is visibly a mistake. */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
+  --s5: 24px; --s6: 32px; --s7: 48px;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { color-scheme: dark; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 13px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Every live number is tabular. This is the single detail that separates a
+   readout you can stare at from one that twitches. */
+.num, .time, .churn, .index, .tree-tokens, .tree-cost, .budget-text,
+.worker-meta, .run-meta, .stat-value, .badge, .evidence {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+/* Scrollbars that do not punch a light hole in a dark panel. */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: var(--line); border-radius: 9px; }
+*::-webkit-scrollbar-thumb:hover { background: #2c3641; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ── shell ───────────────────────────────────────────────────────────── */
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: 0 var(--s5);
+  height: 48px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.top h1 {
+  margin: 0;
+  font: 600 13px/1 var(--sans);
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* A mark rather than a logo: two rules and a dot, drawn in CSS so there is no
+   asset to go stale. */
+.top h1::before {
+  content: "";
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.top-right { display: flex; align-items: center; gap: var(--s3); }
+
+.layout {
+  display: grid;
+  grid-template-columns: 304px minmax(0, 1fr);
+  gap: var(--s4);
+  padding: var(--s4) var(--s5) var(--s7);
+  align-items: start;
+  max-width: 1600px;
+  width: 100%;
+  margin: 0 auto;
+}
+@media (max-width: 980px) {
+  .layout { grid-template-columns: 1fr; padding: var(--s3); }
+  .side { position: static; }
+}
+
+.side {
+  display: flex; flex-direction: column; gap: var(--s3);
+  position: sticky; top: calc(48px + var(--s4));
+}
+.main { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+
+/* ── panels ──────────────────────────────────────────────────────────── */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s3) var(--s4) var(--s4);
+}
+
+.panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s2);
+  padding-bottom: var(--s2);
+  margin: 0 calc(var(--s4) * -1) var(--s3);
+  padding-left: var(--s4); padding-right: var(--s4);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.panel-head h3 {
+  margin: 0;
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.muted { color: var(--text-dim); }
+.small { font-size: 12px; }
+
+/* ── status vocabulary ───────────────────────────────────────────────── */
+/*
+ * One tinted chip, coloured by meaning. The background is mixed from the same
+ * hue as the text so a status reads as a single object rather than as coloured
+ * text floating on grey.
+ */
+.pill {
+  display: inline-flex; align-items: center;
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 7px;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  white-space: nowrap;
+}
+.pill.big { font-size: 11px; padding: 6px 10px; letter-spacing: 0.08em; }
+
+.pill.completed, .pill.selected, .pill.validated, .pill.pass, .pill.ready,
+.pill.healthy {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.pill.failed, .pill.fail, .pill.rejected, .pill.unhealthy, .pill.offline {
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+}
+.pill.cancelled, .pill.cancelling, .pill.repairing, .pill.draining {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+.pill.awaiting_approval {
+  color: var(--hold);
+  background: color-mix(in srgb, var(--hold) 16%, transparent);
+}
+.pill.coding, .pill.planning, .pill.validating, .pill.reviewing,
+.pill.created, .pill.starting, .pill.plan_ready {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.badge {
+  font: 500 11px/1 var(--mono);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+.badge.ok  { color: var(--ok);  border-color: color-mix(in srgb, var(--ok) 30%, var(--line)); }
+.badge.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }
+/* Amber is the state between "the fleet is whole" and "there is no fleet": some
+   registered worker is not answering. Without it the badge has to round a
+   half-dead fleet to one of the two, and it always rounded up. */
+.badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--line)); }
+
+/* A count, not a badge. No border and no tint, because it reports a quantity
+   rather than a state and must not compete with the things that do. */
+.count {
+  font: 500 11px/1 var(--mono);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── lists ───────────────────────────────────────────────────────────── */
+/*
+ * The scroller is measured in rows, not in pixels. Every row is the same height
+ * — 8px of padding, a 20px name, a 3px gap and an 18px detail line — so capping
+ * the box at four and a half of them puts the cut in that 3px gap: the fifth
+ * row shows its name whole and loses its detail line, which reads as a row that
+ * continues. A round `max-height: 300px` cut wherever it landed, and landing
+ * through the middle of a word reads as a rendering fault rather than as an
+ * invitation to scroll. The count in the panel header says how many rows are
+ * below the fold; that and the half row are the whole affordance, since the
+ * gradient that would usually be used here is forbidden and would only be
+ * hiding the same bad cut behind a fade.
+ */
+.list {
+  list-style: none; margin: 0; padding: 0;
+  --row: 57px;
+  max-height: calc(var(--row) * 4.5);
+  overflow-y: auto;
+  /* Scrolling settles on a row edge, so the cut keeps falling where it was
+     designed to fall instead of wherever the wheel stopped. */
+  scroll-snap-type: y proximity;
+}
+
+.list li {
+  min-height: var(--row);
+  padding: var(--s2) var(--s2) var(--s2) var(--s3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex; flex-direction: column; justify-content: center; gap: 3px;
+  position: relative;
+  border-left: 2px solid transparent;
+  scroll-snap-align: start;
+}
+.list li:hover { background: var(--raised); }
+.list li.active {
+  background: var(--raised);
+  border-left-color: var(--accent);
+}
+.list li.muted { cursor: default; border-left-color: transparent; }
+.list li.muted:hover { background: none; }
+/* A chip is as wide as its word. Without this the column's stretch makes a run's
+   status a full-bleed bar, which reads as an alert banner rather than as the
+   label on a row — and the taller rows above made it louder still. */
+.list .pill { align-self: flex-start; }
+
+/* One line, always: a name that wrapped would make its row taller than the rest
+   and move the cut off the gap it was aimed at. */
+.list strong {
+  font-weight: 600; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.list small {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── controls ────────────────────────────────────────────────────────── */
+button {
+  background: var(--raised);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  font: 500 12px/1.2 var(--sans);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+button:hover:not(:disabled) { background: #1e242c; border-color: #2e3742; }
+button:active:not(:disabled) { background: #161b21; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+button.primary {
+  background: color-mix(in srgb, var(--ok) 20%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  color: #a8e6bd;
+  font-weight: 600;
+}
+button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ok) 30%, transparent);
+  border-color: var(--ok);
+}
+
+input, select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  font: 400 12.5px/1.3 var(--sans);
+  width: 100%;
+}
+input::placeholder { color: var(--text-faint); }
+input:focus, select:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.row { display: flex; gap: var(--s2); align-items: center; margin-top: var(--s2); }
+.row label {
+  display: flex; align-items: center; gap: var(--s2);
+  color: var(--text-dim); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+.row label select { width: auto; }
+.row button { flex-shrink: 0; }
+
+.new-run { margin-bottom: var(--s3); }
+
+/* ── new project ─────────────────────────────────────────────────────── */
+.new-project { display: flex; flex-direction: column; gap: var(--s2); }
+.new-project .row { margin-top: 0; }
+.new-project .warn-inline { margin-top: 0; }
+.pickers { display: flex; gap: var(--s2); }
+
+/* A picker is a button in every respect but the element, so it wears the
+   button's exact rule set; the native control is kept in the tree but off it,
+   so the label opens the dialog and the keyboard still reaches it. */
+.pick {
+  position: relative;
+  display: inline-flex; align-items: center;
+  background: var(--raised);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  font: 500 12px/1.2 var(--sans);
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.pick:hover { background: #1e242c; border-color: #2e3742; }
+.pick:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pick input {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  opacity: 0; cursor: pointer;
+  padding: 0; border: 0;
+}
+
+/* What the next request will carry. A count and a size, tabular, so choosing
+   a different folder changes the digits and nothing around them. */
+.manifest {
+  font: 500 11px/1.4 var(--mono);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+/* "nothing chosen" is the absence of a fact, drawn like every other absence. */
+.manifest.empty { color: var(--text-faint); }
+
+/* The list above is one page of a longer history and the endpoint reports no
+   total, so this is the only way to find out what is below it. It sits outside
+   the scroller, full width and quiet: it states what the next request will ask
+   for, it is not a state worth reacting to, and once a short page comes back it
+   disappears and the header count drops its plus. */
+.more {
+  display: block;
+  width: 100%;
+  margin-top: var(--s2);
+  padding: 7px 8px;
+  background: none;
+  border-color: var(--line-soft);
+  color: var(--text-dim);
+  font: 500 11px/1 var(--mono);
+  letter-spacing: 0.04em;
+}
+.more:hover:not(:disabled) { background: var(--raised); color: var(--text); border-color: var(--line); }
+
+/* ── notices ─────────────────────────────────────────────────────────── */
+.error {
+  margin: var(--s3) var(--s5) 0;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
+  color: #f2b3b8;
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+.error::after { content: "  (click to dismiss)"; color: var(--text-faint); }
+
+.warn {
+  color: var(--warn);
+  font-size: 12.5px;
+  margin: var(--s2) 0 0;
+}
+.warn-inline {
+  display: block;
+  margin-top: var(--s2);
+  color: var(--warn);
+  font-size: 11.5px;
+  font-family: var(--mono);
+}
+
+/* ── run header: the instrument ──────────────────────────────────────── */
+.run-head { display: flex; flex-direction: column; gap: var(--s3); }
+
+.run-title { display: flex; align-items: flex-start; gap: var(--s3); }
+.run-title h2 {
+  margin: 0;
+  font: 600 17px/1.35 var(--sans);
+  letter-spacing: -0.015em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Three readouts, value above label, aligned on a baseline. Labels are small and
+ * quiet because you learn them once; the values are what you come back to.
+ */
+.run-meta {
+  display: flex;
+  gap: var(--s5);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line-soft);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  flex-wrap: wrap;
+}
+/* Value first, label under it. The label is read once and then never again;
+   the value is the reason the panel was opened, so it gets the size. */
+.stat { display: flex; flex-direction: column; gap: 2px; }
+.stat-value { font: 500 16px/1.15 var(--mono); color: var(--text); letter-spacing: -0.01em; }
+.stat-label {
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.actions { display: flex; flex-direction: column; gap: var(--s2); }
+
+.approval {
+  padding: var(--s3);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--hold) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--hold) 28%, transparent);
+}
+.approval p { margin: 0 0 var(--s3); font-size: 12.5px; color: #cbb8ee; }
+
+/* ── fleet ───────────────────────────────────────────────────────────── */
+.workers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s3); }
+.workers li { display: flex; flex-direction: column; gap: 6px; }
+
+.worker-head { display: flex; align-items: center; gap: var(--s2); }
+.model {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.worker-meta {
+  display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3);
+  font-family: var(--mono); font-size: 11px; color: var(--text-faint);
+}
+.roles { color: var(--text-faint); }
+
+/*
+ * A worker that stopped answering is demoted the way a rejected candidate is —
+ * the same opacity, because this interface should have one way of saying "still
+ * here, no longer load-bearing" rather than one per panel. The structural half
+ * of the demotion is in the markup: no window, no capacity, no meter, because
+ * none of those are true of it any more.
+ */
+.workers li.gone { opacity: 0.62; }
+
+/*
+ * A meter, not a progress bar: it reports a level, it does not promise an end.
+ * One cell per slot, separated by gaps, so an idle worker shows four empty
+ * cells instead of the full-width hairline the old continuous track drew at 0%
+ * — which sat between two workers at exactly the weight and colour of the rules
+ * used as separators elsewhere, and was read as one.
+ */
+.load { display: flex; gap: 2px; height: 4px; }
+.load > .slot {
+  flex: 1; min-width: 2px;
+  background: var(--line);
+  border-radius: 1px;
+  transition: background 240ms ease;
+}
+.load > .slot.on { background: var(--accent); }
+
+/* ── the unselected column ───────────────────────────────────────────── */
+/* A heading inside a panel, one step below `.panel-head` and carrying its own
+   hairline, so a panel can hold two subjects without becoming two panels. */
+.sub {
+  margin: var(--s4) 0 var(--s2);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line-soft);
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.steps { margin: 0; padding-left: 20px; color: var(--text-dim); font-size: 12.5px; }
+.steps li { padding: 2px 0; }
+.steps li::marker { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+
+/* Labels in a fixed track and values in the other, so the commands line up in a
+   column the eye can run down — the alignment doing what a table's rules
+   would. */
+.kv { margin: 0; display: grid; gap: 2px; }
+.kv-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: var(--s3);
+  align-items: baseline;
+}
+.kv dt {
+  font: 500 10px/1.7 var(--mono);
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+.kv dd {
+  margin: 0;
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+/* "not set" is a fact about the project, not a value, and must not be mistaken
+   for a command at a glance. */
+.kv dd.unset { color: var(--text-faint); }
+
+/* ── candidates ──────────────────────────────────────────────────────── */
+.candidate {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: var(--s3);
+  margin-top: var(--s3);
+  background: var(--raised);
+}
+.candidate:first-of-type { margin-top: 0; }
+.candidate.selected { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.candidate.rejected, .candidate.failed { opacity: 0.72; }
+
+.candidate-head { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.candidate-head button { margin-left: auto; }
+.index { font: 600 12px/1 var(--mono); color: var(--text-dim); }
+.churn { font: 400 11px/1 var(--mono); color: var(--text-faint); }
+
+/*
+ * Deterministic evidence first, and a mark that distinguishes "failed" from
+ * "never ran". A dash is not a zero, and conflating them is how a pipeline
+ * gets believed.
+ */
+.evidence {
+  display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line-soft);
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
+}
+.evidence > span { display: inline-flex; align-items: center; gap: 6px; }
+
+.mark { font-family: var(--mono); font-weight: 700; }
+.mark.ok { color: var(--ok); }
+.mark.bad { color: var(--bad); }
+.mark.skip { color: var(--text-faint); }
+
+.review { margin-top: var(--s3); font-size: 12.5px; }
+.summary { color: var(--text-dim); margin: var(--s2) 0; }
+.notes { margin: var(--s2) 0 0; padding-left: var(--s4); color: var(--text-dim); font-size: 12px; }
+
+.finding {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px var(--s2);
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12px;
+}
+.sev { font: 600 10px/1.6 var(--mono); text-transform: uppercase; letter-spacing: 0.06em; }
+.finding.blocker .sev, .finding.critical .sev, .finding.high .sev { color: var(--bad); }
+.finding.medium .sev { color: var(--warn); }
+.finding.low .sev, .finding.info .sev { color: var(--text-faint); }
+.where { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+.fix { color: var(--text-dim); font-size: 11.5px; }
+
+.overlay {
+  position: fixed; inset: 0; z-index: 50;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--s5);
+}
+.overlay .diff, .diff {
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+  white-space: pre; overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s3);
+  max-height: 80vh; max-width: 1100px; width: 100%;
+}
+
+/* ── context tree ────────────────────────────────────────────────────── */
+.context .files { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+
+.budget { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--s3); }
+.budget-bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.budget-bar > span { display: block; height: 100%; background: var(--accent); }
+.budget-text { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+
+.tree { font-family: var(--mono); font-size: 11.5px; max-height: 420px; overflow: auto; }
+
+.tree-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px 52px;
+  align-items: center;
+  gap: var(--s2);
+  padding: 1px 0;
+  border-radius: 3px;
+}
+/* The dimmed rows are the content, not the chrome: this view exists to make
+   "the agent never saw that file" visible at a glance. */
+.tree-row.unseen { color: var(--text-faint); }
+.tree-row.seen { color: var(--text); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-tokens { text-align: right; color: var(--text-dim); }
+.tree-cost { }
+.tree-bar { height: 3px; background: var(--accent); border-radius: 2px; opacity: 0.55; }
+
+/* ── timeline ────────────────────────────────────────────────────────── */
+.stream {
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 4px 8px; border-radius: var(--radius-sm);
+  background: var(--raised); border: 1px solid var(--line);
+  color: var(--text-faint);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.stream::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+}
+.stream.open { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 32%, var(--line)); }
+/* The only animation in the interface, and it reports a fact: the event stream
+   is connected. Everything else that moves would just be moving. */
+.stream.open::before { animation: pulse 2.4s ease-in-out infinite; }
+.stream.connecting { color: var(--warn); }
+.stream.closed, .stream.error { color: var(--bad); }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+.events {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 460px; overflow-y: auto;
+  position: relative;
+}
+/* A single rail behind the dots, so the eye follows one line instead of
+   twenty disconnected rows. */
+.events::before {
+  content: "";
+  position: absolute;
+  left: 63px; top: 0; bottom: 0;
+  width: 1px; background: var(--line);
+}
+
+.events li {
+  display: grid;
+  grid-template-columns: 56px 15px minmax(140px, auto) auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--s2);
+  padding: 3px 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.events li:hover { background: var(--raised); }
+
+/* The age is the one thing on a row that changes while the row does not, so it
+   is right-aligned in its fixed column: the digits grow leftwards into their own
+   track and the rail, the dot and the event name never move. */
+.time { color: var(--text-faint); font-size: 11px; text-align: right; white-space: nowrap; }
+
+.dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--line);
+  border: 1px solid var(--surface);
+  box-shadow: 0 0 0 2px var(--surface);
+  justify-self: center;
+  position: relative;
+  z-index: 1;
+}
+.events li.good .dot { background: var(--ok); }
+.events li.bad  .dot { background: var(--bad); }
+.events li.warn .dot { background: var(--warn); }
+.events li.hold .dot { background: var(--hold); }
+.events li.info .dot { background: var(--info); }
+
+.name { color: var(--text); }
+.events li.bad .name { color: var(--bad); }
+.events li.warn .name { color: var(--warn); }
+
+.lane {
+  font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  background: var(--line); color: var(--text-dim);
+}
+.detail { color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── motion ──────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* A command field looks like what it takes: monospace, so a sentence typed
+   into it looks wrong before it is submitted. */
+input.command { font-family: var(--mono); font-size: 12px; }
+input.command::placeholder { font-family: var(--mono); color: var(--text-faint); }
+
+.field-head {
+  margin: var(--s2) 0 var(--s1);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.field-head em { font-style: normal; color: var(--text); }

@@ -28,16 +28,21 @@ from application.orchestration.orchestrator import OrchestratorConfig, RunOrches
 from application.orchestration.worker_pool import WorkerPool
 from application.ports import UnitOfWorkFactory
 from application.services.locking import InProcessRunCoordinator
+from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
     ListProjectsUseCase,
+    ReplaceProjectToolchainUseCase,
+    UploadProjectUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
     CreateRunUseCase,
+    GetCandidatePatchUseCase,
     GetRunUseCase,
     ListCandidatesUseCase,
+    ListReviewsUseCase,
     ListRunEventsUseCase,
     ListRunsUseCase,
 )
@@ -73,6 +78,7 @@ from infrastructure.llm import (
     OpenAICompatibleSettings,
     PromptLibrary,
 )
+from infrastructure.projects import LocalProjectFilesStore, missing_executable
 from infrastructure.queue import (
     InMemoryEventBus,
     InMemoryJobQueue,
@@ -80,6 +86,12 @@ from infrastructure.queue import (
     RedisJobQueue,
 )
 from infrastructure.redis import RedisEventBus, RedisWorkerRegistry, create_redis_client
+from infrastructure.telemetry import (
+    NullMetricsRecorder,
+    PlatformMetrics,
+    PrometheusExposition,
+    PrometheusMetricsRecorder,
+)
 from infrastructure.tools import RipgrepRepositoryContextProvider, create_sandbox_executor
 from infrastructure.workspace import GitWorktreeWorkspaceManager
 
@@ -94,6 +106,7 @@ class Container:
 
     settings: Settings
     engine: AsyncEngine
+    metrics: PrometheusExposition | None
     redis: Any | None
     clock: SystemClock
     ids: UuidGenerator
@@ -112,11 +125,16 @@ class Container:
     create_project: CreateProjectUseCase
     get_project: GetProjectUseCase
     list_projects: ListProjectsUseCase
+    replace_project_toolchain: ReplaceProjectToolchainUseCase
+    upload_project: UploadProjectUseCase
     create_run: CreateRunUseCase
     cancel_run: CancelRunUseCase
     get_run: GetRunUseCase
     list_runs: ListRunsUseCase
     list_candidates: ListCandidatesUseCase
+    candidate_patch: GetCandidatePatchUseCase
+    list_reviews: ListReviewsUseCase
+    approve_run: ApproveRunUseCase
     list_run_events: ListRunEventsUseCase
     register_worker: RegisterWorkerUseCase
     heartbeat: HeartbeatUseCase
@@ -155,8 +173,11 @@ def _build_llm_factory(settings: Settings) -> LLMProviderFactory:
         )
     return HttpLLMProviderFactory(
         OpenAICompatibleSettings(
+            api_key=settings.inference_api_key.get_secret_value() or None,
             context_length=settings.model_context_length,
             default_timeout_seconds=settings.llm_request_timeout_seconds,
+            scale_to_zero=settings.inference_scale_to_zero,
+            cold_start_max_wait_seconds=settings.inference_cold_start_max_wait_seconds,
         )
     )
 
@@ -200,7 +221,9 @@ async def build_container(
         queue = RedisJobQueue(redis)
         bus = RedisEventBus(redis)
 
-    sandbox = create_sandbox_executor(prefer_docker=not settings.environment.is_local)
+    sandbox = create_sandbox_executor(
+        prefer_docker=not settings.environment.is_local, image=settings.tool_sandbox_image
+    )
     tools = ProjectToolExecutorFactory(sandbox=sandbox)
     context = RipgrepRepositoryContextProvider(sandbox=sandbox)
     workspace_manager = workspaces or GitWorktreeWorkspaceManager(root=settings.workspace_root)
@@ -211,6 +234,7 @@ async def build_container(
         renderer=renderer,
         codec=codec,
         timeout_seconds=settings.llm_request_timeout_seconds,
+        max_tokens=settings.reserved_output_tokens,
     )
 
     provider_factory = llm_factory or _build_llm_factory(settings)
@@ -235,6 +259,9 @@ async def build_container(
             lease_duration=settings.job_lease,
             job_max_attempts=settings.job_max_attempts,
             static_analysis_is_blocking=settings.static_analysis_is_blocking,
+            reserved_output_tokens=settings.reserved_output_tokens,
+            prompt_overhead_tokens=settings.prompt_overhead_tokens,
+            require_approval=settings.require_approval,
         ),
     )
     executor = JobExecutor(
@@ -252,6 +279,18 @@ async def build_container(
         heartbeat_timeout=settings.heartbeat_timeout,
         bus=bus,
     )
+    # Declared since day one and instantiated nowhere: no recorder was ever
+    # built, no route ever served the exposition, and METRICS_ENABLED gated
+    # nothing. An unfed Prometheus gauge does not go missing from a scrape, it
+    # reads zero — so a dashboard wired to this would have reported "no active
+    # runs, no registered workers" with the confidence of a measurement.
+    platform_metrics = PlatformMetrics.create() if settings.metrics_enabled else None
+    metrics = (
+        PrometheusMetricsRecorder(platform_metrics)
+        if platform_metrics is not None
+        else NullMetricsRecorder()
+    )
+
     maintenance = MaintenanceLoop(
         queue=queue,
         uow_factory=uow_factory,
@@ -259,12 +298,17 @@ async def build_container(
         clock=clock,
         reaper=reaper,
         orchestrator=orchestrator,
+        registry=registry,
+        metrics=metrics,
         config=MaintenanceConfig(interval=settings.reaper_interval),
     )
 
     return Container(
         settings=settings,
         engine=engine,
+        metrics=(
+            PrometheusExposition(platform_metrics) if platform_metrics else None
+        ),
         redis=redis,
         clock=clock,
         ids=ids,
@@ -281,6 +325,16 @@ async def build_container(
         create_project=CreateProjectUseCase(uow_factory=uow_factory, clock=clock, ids=ids),
         get_project=GetProjectUseCase(uow_factory=uow_factory),
         list_projects=ListProjectsUseCase(uow_factory=uow_factory),
+        upload_project=UploadProjectUseCase(
+            uow_factory=uow_factory,
+            clock=clock,
+            ids=ids,
+            files=LocalProjectFilesStore(settings.projects_root),
+            command_probe=missing_executable,
+        ),
+        replace_project_toolchain=ReplaceProjectToolchainUseCase(
+            uow_factory=uow_factory, command_probe=missing_executable
+        ),
         create_run=CreateRunUseCase(
             uow_factory=uow_factory,
             bus=bus,
@@ -293,6 +347,9 @@ async def build_container(
         get_run=GetRunUseCase(uow_factory=uow_factory),
         list_runs=ListRunsUseCase(uow_factory=uow_factory),
         list_candidates=ListCandidatesUseCase(uow_factory=uow_factory),
+        candidate_patch=GetCandidatePatchUseCase(uow_factory=uow_factory),
+        list_reviews=ListReviewsUseCase(uow_factory=uow_factory),
+        approve_run=ApproveRunUseCase(orchestrator=orchestrator),
         list_run_events=ListRunEventsUseCase(uow_factory=uow_factory),
         register_worker=RegisterWorkerUseCase(
             registry=registry,

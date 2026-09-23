@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import ClassVar
 
-from domain.enums import CandidateStatus, FailureKind, ReviewVerdict, RunStatus
+from domain.enums import AgentRole, CandidateStatus, FailureKind, ReviewVerdict, RunStatus
 from domain.events.base import DomainEvent, EventName
 from domain.value_objects.identifiers import CandidateId, JobId, PlanId, ProjectId, RunId
 
@@ -16,8 +17,11 @@ __all__ = [
     "PlanCompleted",
     "PlanRequested",
     "RepairRequested",
+    "RepositoryContextSelected",
     "ReviewCompleted",
     "ReviewRequested",
+    "RunApprovalRejected",
+    "RunAwaitingApproval",
     "RunCancelled",
     "RunCompleted",
     "RunCreated",
@@ -148,6 +152,54 @@ class RunCompleted(DomainEvent):
 
     run_id: RunId
     candidate_id: CandidateId | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RepositoryContextSelected(DomainEvent):
+    """What the agent was actually shown, and what it was not.
+
+    Recorded as an event rather than stored on the candidate: it is evidence
+    about one inference, not state anything decides on, and as an event it is
+    both persisted in the audit trail and delivered live on the run stream —
+    so a viewer sees the selection while the run is still going.
+
+    ``files`` maps each included path to its estimated token cost, and
+    ``notes`` carries what the provider left out and why ("14 relevant file(s)
+    omitted: max_files=40, max_tokens=12288"). A selection that included
+    nothing is the defect that made every agent invent code from a filename
+    list, and it is visible here as an empty mapping.
+    """
+
+    name: ClassVar[EventName] = "context.selected"
+
+    run_id: RunId
+    role: AgentRole
+    candidate_id: CandidateId | None = None
+    files: Mapping[str, int] = field(default_factory=dict)
+    tree: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+    estimated_tokens: int = 0
+    budget_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RunAwaitingApproval(DomainEvent):
+    """Reviewed, and waiting for a human to let it land."""
+
+    name: ClassVar[EventName] = "run.awaiting_approval"
+
+    run_id: RunId
+    candidate_id: CandidateId | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RunApprovalRejected(DomainEvent):
+    """A human refused the patch. The reason is what the coder gets to act on."""
+
+    name: ClassVar[EventName] = "run.approval_rejected"
+
+    run_id: RunId
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

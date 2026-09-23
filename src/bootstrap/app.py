@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
-from bootstrap.config import Settings, get_settings
+from bootstrap.config import Settings, get_api_settings, get_settings
 from bootstrap.container import Container, build_container, describe
 from bootstrap.logging import configure_logging
 from bootstrap.readiness import PlatformReadinessProbe
@@ -36,10 +36,16 @@ def _dependencies(container: Container) -> ApiDependencies:
         create_project=container.create_project,
         get_project=container.get_project,
         list_projects=container.list_projects,
+        replace_project_toolchain=container.replace_project_toolchain,
+        upload_project=container.upload_project,
         create_run=container.create_run,
         get_run=container.get_run,
         cancel_run=container.cancel_run,
         list_candidates=container.list_candidates,
+        list_runs=container.list_runs,
+        candidate_patch=container.candidate_patch,
+        list_reviews=container.list_reviews,
+        approve_run=container.approve_run,
         list_run_events=container.list_run_events,
         list_workers=container.list_workers,
         register_worker=container.register_worker,
@@ -47,6 +53,7 @@ def _dependencies(container: Container) -> ApiDependencies:
         drain_worker=container.drain_worker,
         deregister_worker=container.deregister_worker,
         event_bus=container.bus,
+        metrics=container.metrics,
         readiness=PlatformReadinessProbe(engine=container.engine, redis=container.redis),
         service_authenticator=SharedSecretServiceAuthenticator(
             container.settings.service_token.get_secret_value()
@@ -99,7 +106,9 @@ def create_app(settings: Settings | None = None, *, run_background: bool = True)
                     await task
             await container.aclose()
 
-    return create_api(lifespan=lifespan)
+    # The viewer's origin comes from configuration, which had computed
+    # `allowed_origins` for a long time without anything ever reading it.
+    return create_api(lifespan=lifespan, allowed_origins=get_api_settings().allowed_origins)
 
 
 def main() -> None:

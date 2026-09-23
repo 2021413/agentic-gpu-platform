@@ -21,12 +21,25 @@ from domain.enums import AgentRole
 from domain.value_objects.limits import RunLimits
 
 __all__ = [
+    "PUBLISHED_DEV_SERVICE_TOKEN",
     "ApiSettings",
     "LLMProviderKind",
     "Settings",
     "WorkerSettings",
+    "get_api_settings",
     "get_settings",
 ]
+
+
+PUBLISHED_DEV_SERVICE_TOKEN = "dev-service-token-change-me"
+"""The SERVICE_TOKEN default that ``docker-compose.yml`` and ``.env.example`` set.
+
+It lives here as a name rather than inside the validator because it is not a
+magic string: it is the same contract with those two committed files that the
+module docstring describes, and the day the compose default changes, this is
+the one place that has to follow. The validator below refuses it in production,
+and the tests assert against this name instead of retyping the secret.
+"""
 
 
 @unique
@@ -90,12 +103,88 @@ class Settings(BaseSettings):
     model_id: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
     model_context_length: int = 262_144
     llm_request_timeout_seconds: float = 600.0
+    inference_api_key: SecretStr = SecretStr("")
+    require_approval: bool = False
+    """Hold a reviewed run until a human approves the merge.
+
+    Off by default on purpose: integration writes into someone else's
+    repository, but a run waiting on an approval nobody is watching never
+    finishes. Turning this on is a statement that somebody is watching.
+    """
+    """Bearer token the inference engines demand, if they demand one.
+
+    vLLM started with VLLM_API_KEY refuses everything without it. The adapter
+    has always been able to send a token; nothing passed one, so an engine
+    secured as its own documentation recommends would have answered 401 to
+    every call, on hardware billing by the second.
+
+    Empty means the engines are open, which on an exposed Pod means open to
+    the internet. An empty value sends no header rather than a literal
+    "Bearer ".
+
+    On a Modal Server the value is a proxy token, `wk-<id>.ws-<secret>`. Modal
+    accepts the pair joined by a period in exactly this header, which is why
+    moving to Modal needs no new authentication mechanism here.
+    """
+
+    inference_scale_to_zero: bool = False
+    """Whether the inference endpoint is serverless and may have no worker.
+
+    Set it for a Modal Server, leave it off for a RunPod Pod. It changes what
+    HTTP 503 means: on a serverless endpoint the platform answers 503 from its
+    proxy when the pool is empty and boots a container in response, so the
+    status means "the GPU is starting" and the adapter waits. On a dedicated
+    Pod the same status means something is wrong, and waiting would hide it.
+
+    Leaving this off against a Modal endpoint produces a specific and expensive
+    failure: every first request after an idle period fails, the job is
+    requeued, and the retried job runs on the container the failed one paid to
+    start — a cold start billed on every cycle and attributed to nothing.
+    """
+
+    inference_cold_start_max_wait_seconds: float = 900.0
+    """How long a request may wait for a serverless worker to appear.
+
+    Separate from `llm_request_timeout_seconds` because it measures a different
+    thing: a container booting, not a model generating. It should cover a cold
+    vLLM start — weights resident, CUDA graphs captured — with margin.
+    """
 
     # -- scheduling and jobs --------------------------------------------
     scheduler_strategy: SchedulerStrategy = SchedulerStrategy.LEAST_LOADED
     heartbeat_interval_seconds: float = 10.0
     heartbeat_timeout_seconds: float = 45.0
     job_lease_seconds: float = 120.0
+    tool_sandbox_image: str = "python:3.12-slim"
+    """Image the deterministic tools run in when the docker sandbox is used.
+
+    It must contain the project's build and test tools. The default carries a
+    Python interpreter and nothing else — a C project pointed at it fails every
+    build with "make: not found", and every candidate is then non-viable for a
+    reason that has nothing to do with the code. Point it at an image that can
+    build what you are working on (for example `gcc:13`).
+
+    Known limitation: this is one image for the whole deployment, not one per
+    project. A control plane serving projects in different languages needs the
+    image on ToolchainConfig instead, which is a schema change.
+    """
+    reserved_output_tokens: int = 4_096
+    """Room kept in every worker's context window for the model's answer.
+
+    Used twice, deliberately from one place: the scheduler subtracts it when
+    deciding whether a prompt fits, and it becomes the engine's own max_tokens
+    so the generation cannot quietly exceed what was reserved for it. Two
+    numbers that had to agree is exactly how the 262144/16384 mismatch
+    happened.
+    """
+    prompt_overhead_tokens: int = 2_048
+    """Room kept in the window for the prompt that is not the code excerpt.
+
+    The fleet reports how large a prompt it can take; the repository view is
+    only part of that prompt. Instructions, objective, plan, accumulated review
+    findings and the JSON schema ride in the same window. Counting only the
+    excerpt is what made the first real run fail by exactly one token.
+    """
     job_max_attempts: int = 3
     reaper_interval_seconds: float = 10.0
     executor_concurrency: int = 8
@@ -107,6 +196,13 @@ class Settings(BaseSettings):
     max_parallel_candidates: int = 3
 
     # -- filesystem -----------------------------------------------------
+    projects_root: Path = Path("/projects")
+    """Where uploaded projects live, one directory each, chosen by the server.
+
+    Every project used to point at one bind mount; selecting a project in the
+    viewer ran the agents on whatever was mounted. This root replaces that
+    mount, and no client ever chooses a path under it.
+    """
     workspace_root: Path = Path("/var/lib/agentic/workspaces")
     artifact_root: Path = Path("/var/lib/agentic/artifacts")
     prompts_root: Path = Path("prompts")
@@ -130,6 +226,19 @@ class Settings(BaseSettings):
             )
         if self.environment.is_production and not self.service_token.get_secret_value():
             raise ValueError("SERVICE_TOKEN is required outside local development")
+        if (
+            self.environment.is_production
+            and self.service_token.get_secret_value() == PUBLISHED_DEV_SERVICE_TOKEN
+        ):
+            # A non-empty token passed the check above, which is why this needs its
+            # own branch: the compose default is committed to this repository, so a
+            # deployment that forgets to change it is guarded by a secret anyone can
+            # read. Local development keeps it on purpose, hence the environment test.
+            raise ValueError(
+                "SERVICE_TOKEN is still the published default value from "
+                "docker-compose.yml, which is committed to this repository and so "
+                "known to anyone who can read it; set a real secret in production"
+            )
         if self.environment.is_production and self.llm_provider is LLMProviderKind.FAKE:
             raise ValueError("the fake inference provider must never run in production")
         return self
@@ -188,6 +297,28 @@ class WorkerSettings(BaseSettings):
     inference_base_url: str = "http://127.0.0.1:8000"
     inference_api_key: SecretStr = SecretStr("")
 
+    inference_scale_to_zero: bool = False
+    """Whether this agent's engine is a serverless endpoint that may be at zero.
+
+    The same switch the control plane reads, for a different reason. Here it
+    stops the ten-second heartbeat probe from reaching across the network: on a
+    Modal Server every such request starts a container, so probing liveness on
+    a schedule would keep an H100 warm around the clock. Registration still
+    probes once, because reconciling what the engine really serves is worth one
+    cold start and has caught real mismatches.
+    """
+
+    llm_provider: LLMProviderKind = LLMProviderKind.OPENAI_COMPATIBLE
+    """Which provider backs this worker.
+
+    The field has to exist here even though the worker never calls the model
+    itself: with the fake provider the inference runs inside the control plane,
+    so there is no server at `inference_base_url` to wait for. Without this,
+    `extra="ignore"` silently dropped the LLM_PROVIDER the compose file sets,
+    the agent waited out its startup timeout against nothing, and the pool
+    stayed empty.
+    """
+
     model_id: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
     model_context_length: int = 262_144
     worker_concurrency: int = 4
@@ -240,6 +371,12 @@ class ApiSettings(BaseSettings):
     @property
     def allowed_origins(self) -> tuple[str, ...]:
         return tuple(o.strip() for o in self.cors_allow_origins.split(",") if o.strip())
+
+
+@lru_cache(maxsize=1)
+def get_api_settings() -> ApiSettings:
+    """Presentation-only settings, read once like the rest."""
+    return ApiSettings()
 
 
 @lru_cache(maxsize=1)

@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -25,17 +26,23 @@ from tests.application.fakes import (
     uow_factory_for,
 )
 
+from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
     ListProjectsUseCase,
+    ReplaceProjectToolchainUseCase,
+    UploadProjectUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
     CreateRunUseCase,
+    GetCandidatePatchUseCase,
     GetRunUseCase,
     ListCandidatesUseCase,
+    ListReviewsUseCase,
     ListRunEventsUseCase,
+    ListRunsUseCase,
 )
 from application.use_cases.workers import (
     DeregisterWorkerUseCase,
@@ -44,7 +51,12 @@ from application.use_cases.workers import (
     ListWorkersUseCase,
     RegisterWorkerUseCase,
 )
+from domain.entities.run import Run
+from domain.exceptions import EntityNotFoundError
 from domain.services.task_complexity import HeuristicTaskComplexityPolicy
+from domain.value_objects.identifiers import RunId
+from infrastructure.projects import LocalProjectFilesStore, missing_executable
+from infrastructure.telemetry import PlatformMetrics, PrometheusExposition
 from interfaces.api.app import create_api
 from interfaces.api.dependencies.container import ApiDependencies
 from interfaces.api.dependencies.readiness import DependencyHealth, ReadinessReport
@@ -88,8 +100,22 @@ class Harness:
     headers: dict[str, str] = field(default_factory=dict)
 
 
+class _NoApprovals:
+    """Approval is an orchestrator operation; these are route tests.
+
+    Refusing rather than returning a stub run: a test that reached this would
+    be testing nothing, and should say so loudly.
+    """
+
+    async def approve(self, run_id: RunId) -> Run:
+        raise EntityNotFoundError("Run", run_id)
+
+    async def reject(self, run_id: RunId, *, reason: str) -> Run:
+        raise EntityNotFoundError("Run", run_id)
+
+
 @pytest.fixture
-def harness() -> Harness:
+def harness(tmp_path: Path) -> Harness:
     store = _Store()
     clock = FakeClock()
     ids = FakeIdGenerator()
@@ -103,6 +129,19 @@ def harness() -> Harness:
         create_project=CreateProjectUseCase(uow_factory=uow_factory, clock=clock, ids=ids),
         get_project=GetProjectUseCase(uow_factory=uow_factory),
         list_projects=ListProjectsUseCase(uow_factory=uow_factory),
+        replace_project_toolchain=ReplaceProjectToolchainUseCase(
+            uow_factory=uow_factory, command_probe=missing_executable
+        ),
+        # The real store on a temporary directory: it only touches the
+        # filesystem and git, and a double of it would prove nothing about
+        # zip handling, which is exactly what the upload tests are for.
+        upload_project=UploadProjectUseCase(
+            uow_factory=uow_factory,
+            clock=clock,
+            ids=ids,
+            files=LocalProjectFilesStore(tmp_path / "projects"),
+            command_probe=missing_executable,
+        ),
         create_run=CreateRunUseCase(
             uow_factory=uow_factory,
             bus=bus,
@@ -113,6 +152,10 @@ def harness() -> Harness:
         get_run=GetRunUseCase(uow_factory=uow_factory),
         cancel_run=CancelRunUseCase(uow_factory=uow_factory, bus=bus, queue=queue, clock=clock),
         list_candidates=ListCandidatesUseCase(uow_factory=uow_factory),
+        list_runs=ListRunsUseCase(uow_factory=uow_factory),
+        candidate_patch=GetCandidatePatchUseCase(uow_factory=uow_factory),
+        list_reviews=ListReviewsUseCase(uow_factory=uow_factory),
+        approve_run=ApproveRunUseCase(orchestrator=_NoApprovals()),
         list_run_events=ListRunEventsUseCase(uow_factory=uow_factory),
         list_workers=ListWorkersUseCase(registry=registry),
         register_worker=RegisterWorkerUseCase(
@@ -124,6 +167,10 @@ def harness() -> Harness:
         drain_worker=DrainWorkerUseCase(registry=registry, bus=bus, clock=clock),
         deregister_worker=DeregisterWorkerUseCase(registry=registry, bus=bus, clock=clock),
         event_bus=bus,
+        # A real registry rather than None: the exposition route has two
+        # answers and a suite that only ever sees the disabled one would
+        # not notice the other breaking.
+        metrics=PrometheusExposition(PlatformMetrics.create()),
         readiness=probe,
         service_authenticator=SharedSecretServiceAuthenticator(SERVICE_TOKEN),
     )

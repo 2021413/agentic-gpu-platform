@@ -9,8 +9,8 @@ from typing import Any
 import httpx
 import pytest
 import respx
-from tests.conftest import FakeClock, Recorder
 
+from tests.conftest import FakeClock, Recorder
 from worker.config import Secret, WorkerConfig
 from worker.readiness import (
     SMOKE_MAX_TOKENS,

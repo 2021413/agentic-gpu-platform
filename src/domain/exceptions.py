@@ -6,11 +6,12 @@ documents happens exclusively in ``interfaces.api.errors``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from domain.enums import JobStatus, RunStatus
-    from domain.value_objects.identifiers import JobId, RunId, WorkerId
+    from domain.value_objects.identifiers import JobId, ProjectId, RunId, WorkerId
 
 __all__ = [
     "CandidateError",
@@ -23,10 +24,15 @@ __all__ = [
     "JobLeaseExpiredError",
     "LLMTimeoutError",
     "NoCompatibleWorkerError",
+    "OutputTruncatedError",
     "PlanValidationError",
+    "ProjectAlreadyExistsError",
+    "ProjectNotModifiableError",
+    "ProjectUploadError",
     "RunCancelledError",
     "StructuredOutputError",
     "ToolExecutionError",
+    "ToolchainCommandUnavailableError",
     "WorkerUnavailableError",
     "WorkspaceError",
 ]
@@ -162,6 +168,19 @@ class StructuredOutputError(DomainError):
         self.attempt = attempt
 
 
+class OutputTruncatedError(StructuredOutputError):
+    """The answer ran out of room before it was finished.
+
+    A subclass because it *is* a structured-output failure to everything that
+    only wants to catch one thing, and its own type because the one useful
+    reaction differs: a schema violation is worth re-asking with the violation
+    attached, while a truncation re-asked under the same budget truncates at
+    exactly the same place.
+    """
+
+    code = "output_truncated"
+
+
 class PlanValidationError(DomainError):
     """A structurally valid plan that is semantically unusable (cycles, dangling deps)."""
 
@@ -263,6 +282,87 @@ class JobNotRetryableError(DomainError):
             status=str(status),
             attempt=attempt,
         )
+
+
+class ProjectUploadError(DomainError):
+    """An upload that cannot become a project: empty, malformed, or unsafe.
+
+    Unsafe means a path that would land outside the project directory — a
+    `../` in a zip entry, an absolute filename. Those are refused rather than
+    sanitised: rewriting `../etc/passwd` to `etc/passwd` would create a project
+    the caller did not upload.
+    """
+
+    code = "project_upload_invalid"
+
+
+class ProjectAlreadyExistsError(DomainError):
+    """A second upload under a name that already names a project.
+
+    Creating a project by *reference* is idempotent on its name, because the
+    same reference means the same code. An upload is not: two uploads under one
+    name may carry different files, and returning the old project as if it were
+    the new one would make the caller run their agents on code they did not
+    send. Pick another name, or delete the old project.
+    """
+
+    code = "project_exists"
+
+    def __init__(self, name: str, project_id: ProjectId) -> None:
+        super().__init__(
+            f"a project named {name!r} already exists", name=name, project_id=str(project_id)
+        )
+        self.name = name
+        self.project_id = project_id
+
+
+class ToolchainCommandUnavailableError(DomainError):
+    """A build or test command names an executable that does not exist where
+    the tools run.
+
+    Refused when the toolchain is set, not discovered when a run reaches
+    validation: the observed alternative was a test command of `analyse ce
+    projet`, accepted at upload, with the planner and coder paid for on the
+    GPU before `[Errno 2] No such file or directory` said the command could
+    never have started. Naming the executable is what lets the caller see
+    that a sentence was typed where a command belongs.
+    """
+
+    code = "toolchain_command_unavailable"
+
+    def __init__(self, field: str, command: str, executable: str) -> None:
+        super().__init__(
+            f"{field} names {executable!r}, which is not an executable where the "
+            f"project's tools run; it must be a shell command such as 'pytest -q'",
+            field=field,
+            command=command,
+            executable=executable,
+        )
+        self.field = field
+        self.executable = executable
+
+
+class ProjectNotModifiableError(DomainError):
+    """A project was asked to change while its runs are still using it.
+
+    A run reads the toolchain every time it validates a candidate, so replacing
+    the commands under a live run would let one run judge its own candidates by
+    two different definitions of "passing" — and the losing candidates would
+    have been discarded for failing a check the winners never faced. The
+    refusal names the runs to wait for (or cancel), because the caller cannot
+    act on "later".
+    """
+
+    code = "project_not_modifiable"
+
+    def __init__(self, project_id: ProjectId, active_run_ids: Sequence[RunId]) -> None:
+        super().__init__(
+            "project cannot be modified while runs are in flight",
+            project_id=str(project_id),
+            active_run_ids=[str(run_id) for run_id in active_run_ids],
+        )
+        self.project_id = project_id
+        self.active_run_ids = tuple(active_run_ids)
 
 
 class RunNotModifiableError(DomainError):

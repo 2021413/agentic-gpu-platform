@@ -17,6 +17,7 @@ gigabytes. Four rules shape it:
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -53,6 +54,11 @@ __all__ = [
 ]
 
 MARKER_VERSION = 2
+
+# `flock` failures that genuinely mean "someone else holds it". Anything else —
+# ENOSYS, EOPNOTSUPP, EINVAL, ENOLCK — means the filesystem does not implement
+# advisory locking, which is a different situation and must not be waited out.
+_CONTENDED: frozenset[int] = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
 
 # Weights and configuration only. Fetching every file would also pull the
 # duplicate .pt/.gguf variants some repositories carry.
@@ -195,12 +201,24 @@ def download_lock(
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout_seconds
     handle = path.open("a+")
+    locked = False
     try:
         while True:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
                 break
-            except OSError:
+            except OSError as exc:
+                if exc.errno not in _CONTENDED:
+                    # The filesystem does not implement flock at all. Several
+                    # network and FUSE mounts do not — a Modal Volume among them
+                    # — and every such failure used to be read as "somebody else
+                    # holds the lock", so the caller waited out the whole timeout
+                    # and then blamed a process that never existed. Two hours of
+                    # silence is a worse answer than no mutual exclusion.
+                    if on_wait is not None:
+                        on_wait(0.0, f"lock unsupported here ({os.strerror(exc.errno or 0)})")
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise LockTimeoutError(
@@ -222,7 +240,8 @@ def download_lock(
         yield
     finally:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if locked:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
 

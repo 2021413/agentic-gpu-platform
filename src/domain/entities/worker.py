@@ -180,7 +180,7 @@ class Worker(Entity):
             return False
         if requirements.requires_json_schema and not caps.supports_json_schema:
             return False
-        return caps.fits(requirements.estimated_prompt_tokens)
+        return caps.fits(requirements)
 
     def rejection_reason(self, requirements: JobRequirements) -> str | None:  # noqa: PLR0911
         """Why ``can_accept`` said no — used for diagnosable scheduling errors."""
@@ -197,8 +197,16 @@ class Worker(Entity):
             return "tool calling unsupported"
         if requirements.requires_json_schema and not caps.supports_json_schema:
             return "structured output unsupported"
-        if not caps.fits(requirements.estimated_prompt_tokens):
-            return f"prompt exceeds context length {caps.context_length}"
+        if not caps.fits(requirements):
+            budget = caps.usable_prompt_tokens(
+                reserved_output_tokens=requirements.reserved_output_tokens
+            )
+            return (
+                f"prompt of {requirements.estimated_prompt_tokens} tokens exceeds the "
+                f"usable context of {budget} "
+                f"(window {caps.context_length}, reserved for the reply "
+                f"{requirements.reserved_output_tokens})"
+            )
         return None
 
     # -- lifecycle ------------------------------------------------------

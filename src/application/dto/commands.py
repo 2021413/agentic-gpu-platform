@@ -6,7 +6,7 @@ because delivery is assumed to be at-least-once (spec section 35).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,8 +30,11 @@ __all__ = [
     "DrainWorkerCommand",
     "HeartbeatCommand",
     "RegisterWorkerCommand",
+    "ReplaceProjectToolchainCommand",
     "ReportJobFailureCommand",
     "ReportJobResultCommand",
+    "UploadProjectCommand",
+    "UploadedFile",
 ]
 
 
@@ -43,6 +46,45 @@ class CreateProjectCommand:
     default_branch: str = "main"
     toolchain: ToolchainConfig | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class UploadedFile:
+    """One file from an upload. ``path`` is relative to the project root."""
+
+    path: str
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class UploadProjectCommand:
+    """Create a project from the files the caller sent, and nothing else.
+
+    There is no path here on purpose. Where the files end up is the server's
+    decision, and the toolchain is detected from them unless the caller says
+    otherwise for a specific field.
+    """
+
+    name: str
+    files: Sequence[UploadedFile]
+    language: str | None = None
+    build_command: str | None = None
+    test_command: str | None = None
+    default_branch: str = "main"
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaceProjectToolchainCommand:
+    """Correct the commands a project runs.
+
+    A whole ``ToolchainConfig``, never a handful of fields to merge: the
+    commands are read together when a candidate is validated, and a partial
+    update cannot tell "leave the test command alone" apart from "there is no
+    test command" without inventing a sentinel for absence.
+    """
+
+    project_id: ProjectId
+    toolchain: ToolchainConfig
 
 
 @dataclass(frozen=True, slots=True)

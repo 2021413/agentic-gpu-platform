@@ -38,8 +38,9 @@ CLEAR_LEASE = (
 )
 
 ENQUEUE = """
--- KEYS: job hash, ready set for the job type, run index
--- ARGV: job id, queue score, then the job record as field/value pairs
+-- KEYS: job hash, ready set for the job type, run index, delayed set
+-- ARGV: job id, queue score, ready-at ms ('0' for now), then the job record
+--       as field/value pairs
 local status = redis.call('HGET', KEYS[1], 'status')
 if status == 'LEASED' or status == 'RUNNING' then
   -- Republishing a job somebody is holding would hand the same work to a
@@ -50,8 +51,17 @@ if redis.call('HGET', KEYS[1], 'acked') == '1' then
   -- The acknowledgement tombstone: this job is finished and must not come back.
   return 0
 end
-redis.call('HSET', KEYS[1], unpack(ARGV, 3))
-redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[1])
+redis.call('HSET', KEYS[1], unpack(ARGV, 4))
+if ARGV[3] == '0' then
+  redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[1])
+  redis.call('ZREM', KEYS[4], ARGV[1])
+else
+  -- Published, but not yet offered. Republishing a job that a release has just
+  -- deferred must not hand it straight back to the next consumer: a requeue is
+  -- release-then-publish, and the second call used to undo the first.
+  redis.call('ZADD', KEYS[4], tonumber(ARGV[3]), ARGV[1])
+  redis.call('ZREM', KEYS[2], ARGV[1])
+end
 redis.call('SADD', KEYS[3], ARGV[1])
 return 1
 """
@@ -59,10 +69,31 @@ return 1
 CLAIM = """
 -- KEYS: leases set, then one ready set per requested job type
 -- ARGV: job key prefix, now ms, expiry ms, lease token, consumer id,
---       now ISO-8601, expiry ISO-8601
+--       now ISO-8601, expiry ISO-8601, ready set prefix, delayed set prefix,
+--       comma-separated job types
 -- Returns the job record as it was *before* the lease, so the caller can
 -- replay the transition through the domain entity instead of trusting Lua.
 local leases = KEYS[1]
+
+-- Anything whose delay has elapsed rejoins its ready set at the score it
+-- already had, so waiting never costs a job its place behind newer work of the
+-- same priority. Done here rather than in a sweeper so that "becomes
+-- claimable" is atomic with "is claimed": there is no instant at which a due
+-- job belongs to neither set.
+for job_type in string.gmatch(ARGV[10], '[^,]+') do
+  local delayed_key = ARGV[9] .. job_type
+  local due = redis.call('ZRANGEBYSCORE', delayed_key, '-inf', ARGV[2], 'LIMIT', 0, 64)
+  for _, due_id in ipairs(due) do
+    local due_key = ARGV[1] .. due_id
+    if redis.call('EXISTS', due_key) == 1
+       and redis.call('HGET', due_key, 'status') == 'QUEUED' then
+      redis.call('ZADD', ARGV[8] .. job_type,
+                 tonumber(redis.call('HGET', due_key, 'score')), due_id)
+    end
+    redis.call('ZREM', delayed_key, due_id)
+  end
+end
+
 for _ = 1, 64 do
   local best_key, best_id, best_score
   for i = 2, #KEYS do
@@ -154,7 +185,10 @@ return 1
 
 RELEASE = f"""
 -- KEYS: job hash, leases set
--- ARGV: job id, lease token, requeue flag, ready set prefix
+-- ARGV: job id, lease token, requeue flag, ready set prefix, ready-at ms,
+--       delayed set prefix
+-- The requeue flag: '0' do not requeue, '1' claimable now, '2' claimable at
+-- ARGV[5].
 if redis.call('EXISTS', KEYS[1]) == 0 then
   return 0
 end
@@ -163,7 +197,14 @@ if redis.call('HGET', KEYS[1], 'lease_token') ~= ARGV[2] then
 end
 redis.call('ZREM', KEYS[2], ARGV[1])
 redis.call('HSET', KEYS[1], {CLEAR_LEASE})
-if ARGV[3] == '1' then
+if ARGV[3] == '2' then
+  -- Queued, but not yet offered to anyone. The job keeps its score, so when the
+  -- delay elapses it rejoins the ready set where it belongs rather than at the
+  -- back: the wait is a pause, not a demotion.
+  redis.call('HSET', KEYS[1], 'status', 'QUEUED')
+  redis.call('ZADD', ARGV[6] .. redis.call('HGET', KEYS[1], 'type'),
+             tonumber(ARGV[5]), ARGV[1])
+elseif ARGV[3] == '1' then
   -- The stored score sends the job back to the position it had, so giving work
   -- back never costs it its place behind newer jobs of the same priority.
   redis.call('HSET', KEYS[1], 'status', 'QUEUED')

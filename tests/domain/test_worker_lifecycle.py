@@ -73,7 +73,25 @@ def test_a_prompt_larger_than_the_context_window_is_refused(now: datetime) -> No
     worker = make_worker(now=now, context_length=1000)
     huge = JobRequirements(role=AgentRole.CODER, estimated_prompt_tokens=4000)
     assert worker.can_accept(huge) is False
-    assert "context length" in (worker.rejection_reason(huge) or "")
+    reason = worker.rejection_reason(huge) or ""
+    # The numbers matter: "too big" sends an operator looking at the wrong
+    # knob, while the window and the reserve say which one to turn.
+    assert "4000" in reason and "1000" in reason, reason
+
+
+def test_a_prompt_that_fits_the_window_but_not_the_reply_is_refused(now: datetime) -> None:
+    """The half of the rule that was missing.
+
+    900 tokens fit a 1000-token window, but not with 256 kept back for the
+    answer — and an answer with nowhere to go is a truncated one.
+    """
+    worker = make_worker(now=now, context_length=1000)
+    tight = JobRequirements(
+        role=AgentRole.CODER, estimated_prompt_tokens=900, reserved_output_tokens=256
+    )
+
+    assert worker.can_accept(tight) is False
+    assert "reserved for the reply" in (worker.rejection_reason(tight) or "")
 
 
 def test_staleness_is_measured_from_the_last_heartbeat(worker: Worker, now: datetime) -> None:

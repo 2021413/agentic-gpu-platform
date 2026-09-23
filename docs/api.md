@@ -79,7 +79,44 @@ none simply has no such validation step.
 ```
 
 Creation is **idempotent on the name**: posting the same name again returns the
-existing project instead of a duplicate (still with `201`).
+existing project instead of a duplicate (still with `201`) — *unchanged*. It is
+not a way to correct a project; see `PUT .../toolchain` below.
+
+### `PUT /v1/projects/{project_id}/toolchain` — correct the commands
+
+Body: the `toolchain` object above, on its own.
+
+```json
+{
+  "language": "python",
+  "build_command": "make",
+  "test_command": "make test",
+  "static_analysis_command": null,
+  "install_command": null,
+  "working_subdirectory": null,
+  "environment": {}
+}
+```
+
+A **replacement**, not a merge: what you send is what the project will run, and
+a command you leave out is a command the project no longer has. That is the
+only shape in which "this project should have no test command any more" can be
+expressed at all.
+
+Only the commands. A project's `name`, `repository_url`, `local_path` and
+`default_branch` are not part of this resource and sending one is a `422` —
+they say *which* code is worked on, and rewriting them in place would leave the
+project's existing runs recorded against a tree they never touched. Changing
+those still means a new project.
+
+`200` with the same body as `GET`, and:
+
+* `404` if the project is unknown;
+* `409` `project_not_modifiable` while **any run of this project is still in
+  flight** — a run reads these commands every time it validates a candidate, so
+  a change landing mid-run would judge one run's candidates by two different
+  definitions of passing. The problem document lists the runs in
+  `details.active_run_ids`: wait for them, or cancel them.
 
 ### `GET /v1/projects/{project_id}`
 
@@ -392,6 +429,7 @@ hostname is baked into error bodies; the base is configurable per deployment.
 | `not_found` | 404 | The referenced project, run or worker does not exist. |
 | `invalid_state_transition` | 409 | The resource exists but cannot move that way; retrying unchanged keeps failing until it moves — that is a conflict, not a bad request. |
 | `run_not_modifiable` | 409 | The run is already terminal. |
+| `project_not_modifiable` | 409 | The project has runs in flight, which are reading the toolchain being replaced. |
 | `run_cancelled` | 409 | The work was abandoned because the run is cancelling. |
 | `idempotency_conflict` | 409 | The same idempotency key was reused with a different body: the caller contradicted itself. |
 | `job_lease_expired` | 409 | A worker reported on a job whose lease it no longer holds; the result is discarded. |

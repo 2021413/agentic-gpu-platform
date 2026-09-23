@@ -80,6 +80,7 @@ from infrastructure.database.models import (
 __all__ = [
     "apply_candidate",
     "apply_job",
+    "apply_project_toolchain",
     "apply_run",
     "apply_worker",
     "candidate_to_domain",
@@ -129,6 +130,18 @@ def project_to_domain(model: ProjectModel) -> Project:
         local_path=model.local_path,
         metadata=dict(model.meta),
     )
+
+
+def apply_project_toolchain(model: ProjectModel, project: Project) -> None:
+    """Copy the commands onto the row, and touch no other column.
+
+    The toolchain already has a column of its own — a JSON document — so
+    correcting a project is a write to something that exists, not a schema
+    change. Only that column is assigned: ``local_path``, ``repository_url``
+    and ``default_branch`` are what the project's existing runs were performed
+    against, and rewriting them here would quietly rewrite their history too.
+    """
+    model.toolchain = _dump_toolchain(project.toolchain)
 
 
 def _dump_toolchain(toolchain: ToolchainConfig) -> dict[str, Any]:

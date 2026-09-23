@@ -58,10 +58,22 @@ def toolchain() -> ToolchainConfig:
 @pytest.fixture
 def e2e_settings(postgres_url: str, tmp_path: Path) -> Settings:
     return Settings(
+        # `Settings` reads `.env`, so without this the suite inherits whatever
+        # the developer happens to be pointing at. Setting REQUIRE_APPROVAL=true
+        # locally to guard a real repository made an end-to-end test assert
+        # COMPLETED against a run correctly parked in AWAITING_APPROVAL — a test
+        # that fails for a reason outside the repository is not a test.
+        _env_file=None,  # type: ignore[call-arg]
         environment=Environment.CI,
         database_url=postgres_url,
         service_token="e2e-token",
         llm_provider=LLMProviderKind.FAKE,
+        # Stated rather than inherited: this suite asserts that a run reaches
+        # COMPLETED on its own, which is only true when nothing holds it.
+        require_approval=False,
+        # Uploaded projects land here rather than in /projects, which does not
+        # exist on a developer machine and must not on a CI runner.
+        projects_root=tmp_path / "projects",
         workspace_root=tmp_path / "workspaces",
         artifact_root=tmp_path / "artifacts",
         prompts_root=Path("prompts"),

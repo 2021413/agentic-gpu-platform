@@ -19,17 +19,23 @@ from typing import Annotated
 from fastapi import Depends
 from starlette.requests import Request
 
+from application.use_cases.approvals import ApproveRunUseCase
 from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
     ListProjectsUseCase,
+    ReplaceProjectToolchainUseCase,
+    UploadProjectUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
     CreateRunUseCase,
+    GetCandidatePatchUseCase,
     GetRunUseCase,
     ListCandidatesUseCase,
+    ListReviewsUseCase,
     ListRunEventsUseCase,
+    ListRunsUseCase,
 )
 from application.use_cases.workers import (
     DeregisterWorkerUseCase,
@@ -58,7 +64,9 @@ __all__ = [
     "ListWorkersDep",
     "ReadinessDep",
     "RegisterWorkerDep",
+    "ReplaceProjectToolchainDep",
     "ServiceAuthenticatorDep",
+    "UploadProjectDep",
     "WorkerHeartbeatDep",
     "get_dependencies",
 ]
@@ -101,6 +109,14 @@ def get_list_projects(container: ContainerDep) -> ListProjectsUseCase:
     return container.list_projects
 
 
+def get_replace_project_toolchain(container: ContainerDep) -> ReplaceProjectToolchainUseCase:
+    return container.replace_project_toolchain
+
+
+def get_upload_project(container: ContainerDep) -> UploadProjectUseCase:
+    return container.upload_project
+
+
 def get_create_run(container: ContainerDep) -> CreateRunUseCase:
     return container.create_run
 
@@ -115,6 +131,22 @@ def get_cancel_run(container: ContainerDep) -> CancelRunUseCase:
 
 def get_list_candidates(container: ContainerDep) -> ListCandidatesUseCase:
     return container.list_candidates
+
+
+def get_list_runs(container: ContainerDep) -> ListRunsUseCase:
+    return container.list_runs
+
+
+def get_candidate_patch(container: ContainerDep) -> GetCandidatePatchUseCase:
+    return container.candidate_patch
+
+
+def get_list_reviews(container: ContainerDep) -> ListReviewsUseCase:
+    return container.list_reviews
+
+
+def get_approve_run(container: ContainerDep) -> ApproveRunUseCase:
+    return container.approve_run
 
 
 def get_list_run_events(container: ContainerDep) -> ListRunEventsUseCase:
@@ -156,10 +188,18 @@ def get_service_authenticator(container: ContainerDep) -> ServiceAuthenticator:
 CreateProjectDep = Annotated[CreateProjectUseCase, Depends(get_create_project)]
 GetProjectDep = Annotated[GetProjectUseCase, Depends(get_get_project)]
 ListProjectsDep = Annotated[ListProjectsUseCase, Depends(get_list_projects)]
+UploadProjectDep = Annotated[UploadProjectUseCase, Depends(get_upload_project)]
+ReplaceProjectToolchainDep = Annotated[
+    ReplaceProjectToolchainUseCase, Depends(get_replace_project_toolchain)
+]
 CreateRunDep = Annotated[CreateRunUseCase, Depends(get_create_run)]
 GetRunDep = Annotated[GetRunUseCase, Depends(get_get_run)]
 CancelRunDep = Annotated[CancelRunUseCase, Depends(get_cancel_run)]
 ListCandidatesDep = Annotated[ListCandidatesUseCase, Depends(get_list_candidates)]
+ListRunsDep = Annotated[ListRunsUseCase, Depends(get_list_runs)]
+CandidatePatchDep = Annotated[GetCandidatePatchUseCase, Depends(get_candidate_patch)]
+ListReviewsDep = Annotated[ListReviewsUseCase, Depends(get_list_reviews)]
+ApproveRunDep = Annotated[ApproveRunUseCase, Depends(get_approve_run)]
 ListRunEventsDep = Annotated[ListRunEventsUseCase, Depends(get_list_run_events)]
 ListWorkersDep = Annotated[ListWorkersUseCase, Depends(get_list_workers)]
 RegisterWorkerDep = Annotated[RegisterWorkerUseCase, Depends(get_register_worker)]
