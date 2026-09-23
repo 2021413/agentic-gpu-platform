@@ -71,6 +71,9 @@ def e2e_settings(postgres_url: str, tmp_path: Path) -> Settings:
         # Stated rather than inherited: this suite asserts that a run reaches
         # COMPLETED on its own, which is only true when nothing holds it.
         require_approval=False,
+        # Uploaded projects land here rather than in /projects, which does not
+        # exist on a developer machine and must not on a CI runner.
+        projects_root=tmp_path / "projects",
         workspace_root=tmp_path / "workspaces",
         artifact_root=tmp_path / "artifacts",
         prompts_root=Path("prompts"),

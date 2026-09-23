@@ -38,19 +38,22 @@ if [ -n "$(git -C "$project_path" status --porcelain)" ]; then
        a dirty tree is refused."
 fi
 
-# 2. Make it visible inside the api container.
-echo "==> mounting $project_path at /projects/current"
-if grep -q '^LOCAL_PROJECT_PATH=' .env; then
-    sed -i "s|^LOCAL_PROJECT_PATH=.*|LOCAL_PROJECT_PATH=$project_path|" .env
-else
-    printf 'LOCAL_PROJECT_PATH=%s\n' "$project_path" >> .env
-fi
-docker compose up -d api >/dev/null
+# 2. Send the project to the control plane. It used to be bind-mounted at one
+#    fixed path that every project record pointed to, so picking any project
+#    ran the agents on whatever was mounted. Now the files are uploaded and the
+#    server keeps them, one directory per project, at a path nobody chooses.
+#    The archive is built from `git ls-files`, so ignored artefacts, virtualenvs
+#    and build output never leave the machine.
+archive="$(mktemp --suffix=.zip)"
+trap 'rm -f "$archive"' EXIT
+( cd "$project_path" && git ls-files -z | xargs -0 zip -q "$archive" ) \
+    || die "could not archive $project_path (is zip installed?)"
+echo "==> archived $(git -C "$project_path" ls-files | wc -l) tracked file(s), $(du -h "$archive" | cut -f1)"
 for _ in $(seq 1 30); do
     curl -fsS -m2 "$API/health" >/dev/null 2>&1 && break
     sleep 2
 done
-curl -fsS -m5 "$API/health" >/dev/null || die "the control plane did not come back up"
+curl -fsS -m5 "$API/health" >/dev/null || die "the control plane is not up (make docker-up)"
 
 # 3. Toolchain. Guessed from what is in the repository, never silently: a wrong
 #    build command reported as a code defect would poison the repair loop.
@@ -140,15 +143,27 @@ if [ -n "$missing" ]; then
     fi
 fi
 
-json_or_null() { [ -n "$1" ] && printf '"%s"' "$1" || printf 'null'; }
-
-pid=$(curl -fsS -X POST "$API/v1/projects" -H 'content-type: application/json' \
-  -d "{\"name\":\"$name\",\"local_path\":\"/projects/current\",\"default_branch\":\"main\",
-       \"toolchain\":{\"language\":\"$lang\",
-                      \"build_command\":$(json_or_null "$build"),
-                      \"test_command\":$(json_or_null "$test")}}" \
-  | $PY -c 'import json,sys; print(json.load(sys.stdin)["id"])') \
-  || die "could not create the project; is the control plane running? (make docker-up)"
+# Upload. The server detects the toolchain from the files it receives; the
+# guess above is sent only where the caller overrode it, so the server and
+# this script cannot disagree about a project only the server can see.
+form=(-F "name=$name" -F "files=@$archive;filename=project.zip")
+[ -n "${BUILD+x}" ] && form+=(-F "build_command=$build")
+[ -n "${TEST+x}" ]  && form+=(-F "test_command=$test")
+response="$(curl -sS -w '\n%{http_code}' -X POST "$API/v1/projects/upload" "${form[@]}")" \
+    || die "could not reach the control plane"
+http_code="${response##*$'\n'}"
+body="${response%$'\n'*}"
+detail() { printf '%s' "$body" | $PY -c 'import json,sys
+try: print(json.load(sys.stdin).get("detail") or "")
+except Exception: pass'; }
+case "$http_code" in
+    201) pid=$(printf '%s' "$body" | $PY -c 'import json,sys; print(json.load(sys.stdin)["id"])') ;;
+    409) die "a project named '$name' already exists, and an upload may carry different
+       code, so it is not reused. Pick another name:
+           NAME=$name-2 ./run-on.sh \"$project_path\" \"$objective\"" ;;
+    *)   die "upload refused (HTTP $http_code): $(detail)" ;;
+esac
+echo "==> project $name uploaded as $pid"
 
 # Creating a project that already exists returns the existing record, commands
 # and all, so a second run with different commands would silently use the first

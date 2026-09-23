@@ -101,16 +101,18 @@ RUN apt-get update \
 # calls and git run from inside the sandbox. It is also why this cannot live in
 # the entrypoint: that already runs as `app` and cannot write /etc.
 #
-# Scoped to the one path, not `*`: the mount point is fixed by the compose file,
-# so there is no reason to disarm the check for every directory in the image.
-RUN git config --system --add safe.directory /projects/current
+# Every project directory under /projects is created by this container as
+# `app`, so ownership matches and git has nothing to object to. The entry is
+# kept for a project directory restored from elsewhere with another owner.
+RUN git config --system --add safe.directory '/projects/*'
+
 
 # Unprivileged account: the control plane never needs root, and agent-produced
 # code must never be one misconfiguration away from it.
 RUN groupadd --gid 10001 app \
  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin app \
- && mkdir -p /var/lib/agentic/workspaces /var/lib/agentic/artifacts \
- && chown -R app:app /var/lib/agentic
+ && mkdir -p /var/lib/agentic/workspaces /var/lib/agentic/artifacts /projects \
+ && chown -R app:app /var/lib/agentic /projects
 
 COPY --from=builder /opt/venv /opt/venv
 

@@ -22,6 +22,7 @@ from application.use_cases.projects import (
     GetProjectUseCase,
     ListProjectsUseCase,
     ReplaceProjectToolchainUseCase,
+    UploadProjectUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
@@ -62,6 +63,7 @@ class ApiDependencies:
     get_project: GetProjectUseCase
     list_projects: ListProjectsUseCase
     replace_project_toolchain: ReplaceProjectToolchainUseCase
+    upload_project: UploadProjectUseCase
     # runs
     create_run: CreateRunUseCase
     get_run: GetRunUseCase

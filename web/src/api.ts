@@ -140,9 +140,14 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // A multipart body must not be given a content type here: the browser writes
+  // one that carries the part boundary, and a hand-set `multipart/form-data`
+  // without it is a body the server cannot split.
+  const typed: HeadersInit =
+    init?.body instanceof FormData ? {} : { "content-type": "application/json" };
   const response = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: { ...typed, ...(init?.headers ?? {}) },
   });
   if (!response.ok) {
     // The API answers RFC 9457 problem documents; surfacing `detail` is what
@@ -165,12 +170,29 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   projects: () => request<Project[]>("/v1/projects"),
   project: (id: string) => request<Project>(`/v1/projects/${id}`),
-  createProject: (body: {
+  /**
+   * Create a project from its files.
+   *
+   * Each part's filename is the file's path relative to the project root, which
+   * is how the server learns the tree; a lone `.zip` is extracted server-side
+   * instead. Build and test commands left out are detected from the upload, and
+   * the returned toolchain says what was chosen. There is deliberately no other
+   * way to create a project: one that pointed at a path on the API host shared
+   * that path with every other project that did.
+   */
+  uploadProject: (upload: {
     name: string;
-    local_path: string;
-    default_branch: string;
-    toolchain: { language: string; build_command: string | null; test_command: string | null };
-  }) => request<Project>("/v1/projects", { method: "POST", body: JSON.stringify(body) }),
+    files: { path: string; file: File }[];
+    build_command?: string;
+    test_command?: string;
+  }) => {
+    const body = new FormData();
+    body.append("name", upload.name);
+    for (const { path, file } of upload.files) body.append("files", file, path);
+    if (upload.build_command) body.append("build_command", upload.build_command);
+    if (upload.test_command) body.append("test_command", upload.test_command);
+    return request<Project>("/v1/projects/upload", { method: "POST", body });
+  },
 
   /**
    * One page of a project's runs, newest first.

@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from application.dto.commands import CreateProjectCommand, ReplaceProjectToolchainCommand
+from application.dto.commands import (
+    CreateProjectCommand,
+    ReplaceProjectToolchainCommand,
+    UploadProjectCommand,
+)
 from application.dto.views import ProjectView
-from application.ports import UnitOfWorkFactory
-from domain.entities.project import Project
-from domain.exceptions import EntityNotFoundError, ProjectNotModifiableError
+from application.ports import ProjectFilesStore, UnitOfWorkFactory
+from domain.entities.project import Project, ToolchainConfig
+from domain.exceptions import (
+    EntityNotFoundError,
+    ProjectAlreadyExistsError,
+    ProjectNotModifiableError,
+)
 from domain.ports.clock import Clock, IdGenerator
 from domain.value_objects.identifiers import ProjectId
 
@@ -17,6 +25,7 @@ __all__ = [
     "GetProjectUseCase",
     "ListProjectsUseCase",
     "ReplaceProjectToolchainUseCase",
+    "UploadProjectUseCase",
 ]
 
 
@@ -45,6 +54,72 @@ class CreateProjectUseCase:
                 default_branch=command.default_branch,
                 toolchain=command.toolchain,
                 metadata=command.metadata,
+            )
+            await uow.projects.add(project)
+            await uow.commit()
+            return ProjectView.of(project)
+
+
+class UploadProjectUseCase:
+    """Create a project from uploaded files.
+
+    Not idempotent on the name, unlike creation by reference. Two uploads under
+    one name may carry different files, and answering the second with the first
+    project would run the caller's agents on code they did not send. A name
+    collision is a conflict, and the caller picks another name.
+
+    The files are materialised *before* the record exists, so a refused upload
+    leaves nothing in the database — and the directory is removed by the store
+    if anything after writing fails.
+    """
+
+    def __init__(
+        self,
+        *,
+        uow_factory: UnitOfWorkFactory,
+        clock: Clock,
+        ids: IdGenerator,
+        files: ProjectFilesStore,
+    ) -> None:
+        self._uow_factory = uow_factory
+        self._clock = clock
+        self._ids = ids
+        self._files = files
+
+    async def execute(self, command: UploadProjectCommand) -> ProjectView:
+        async with self._uow_factory() as uow:
+            existing = await uow.projects.get_by_name(command.name)
+            if existing is not None:
+                raise ProjectAlreadyExistsError(command.name, existing.id)
+
+        project_id = self._ids.next_id(ProjectId)
+        stored = await self._files.materialise(project_id, command.files)
+
+        # Detection fills in whatever the caller left unsaid, field by field:
+        # a caller who knows the test command but not the language should not
+        # have to guess the language to keep the command.
+        detected = stored.toolchain
+        toolchain = ToolchainConfig(
+            language=command.language or detected.language,
+            build_command=(
+                command.build_command
+                if command.build_command is not None
+                else detected.build_command
+            ),
+            test_command=(
+                command.test_command if command.test_command is not None else detected.test_command
+            ),
+        )
+
+        async with self._uow_factory() as uow:
+            project = Project.create(
+                project_id=project_id,
+                name=command.name,
+                now=self._clock.now(),
+                local_path=str(stored.path),
+                default_branch=command.default_branch,
+                toolchain=toolchain,
+                metadata={"source": "upload", "uploaded_files": str(stored.file_count)},
             )
             await uow.projects.add(project)
             await uow.commit()

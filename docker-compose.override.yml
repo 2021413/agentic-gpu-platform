@@ -1,20 +1,9 @@
-# Local project mounting.
-#
-# The orchestrator creates git worktrees from the project it is given, so a
-# project referenced by `local_path` must be reachable from inside the api
-# container — not merely from your shell. This file bind-mounts one directory
-# from the host so `local_path` can point at it.
-#
-# Set LOCAL_PROJECT_PATH in .env to the absolute path of your project, then:
-#   make docker-up
-#
-# The mount is read-write on purpose: the accepted patch is merged back into
-# the base repository through a controlled `git merge`, and that writes.
+# Projects are no longer mounted from the host. They are uploaded through
+# `POST /v1/projects/upload` (or the viewer) and live on the `projects-data`
+# volume, one directory each, owned by the api container. The bind mount that
+# used to be here made every project point at the same path, so selecting one
+# in the viewer ran the agents against whatever happened to be mounted.
 services:
-  api:
-    volumes:
-      - ${LOCAL_PROJECT_PATH:?set LOCAL_PROJECT_PATH in .env}:/projects/current:rw
-
   # A worker agent for an inference server that lives somewhere else — today a
   # Modal Server, an HTTPS endpoint that scales to zero. The agent runs here,
   # next to the control plane; only the model is remote.

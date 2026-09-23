@@ -118,6 +118,10 @@ services:
     ports:
       - "${API_PUBLISHED_PORT:-8000}:8000"
     volumes:
+      # One directory per uploaded project, chosen by the server. Replaces the
+      # single bind mount every project used to share, which ran the agents on
+      # whatever was mounted rather than on the project that was selected.
+      - projects-data:/projects
       - agentic-state:/var/lib/agentic
     # Health is the HEALTHCHECK declared in docker/api.Dockerfile (GET /health);
     # `condition: service_healthy` below relies on it.
@@ -231,3 +235,4 @@ volumes:
   redis-data:
   agentic-state:
   hf-cache:
+  projects-data:

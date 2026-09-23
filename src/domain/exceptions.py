@@ -26,7 +26,9 @@ __all__ = [
     "NoCompatibleWorkerError",
     "OutputTruncatedError",
     "PlanValidationError",
+    "ProjectAlreadyExistsError",
     "ProjectNotModifiableError",
+    "ProjectUploadError",
     "RunCancelledError",
     "StructuredOutputError",
     "ToolExecutionError",
@@ -279,6 +281,38 @@ class JobNotRetryableError(DomainError):
             status=str(status),
             attempt=attempt,
         )
+
+
+class ProjectUploadError(DomainError):
+    """An upload that cannot become a project: empty, malformed, or unsafe.
+
+    Unsafe means a path that would land outside the project directory — a
+    `../` in a zip entry, an absolute filename. Those are refused rather than
+    sanitised: rewriting `../etc/passwd` to `etc/passwd` would create a project
+    the caller did not upload.
+    """
+
+    code = "project_upload_invalid"
+
+
+class ProjectAlreadyExistsError(DomainError):
+    """A second upload under a name that already names a project.
+
+    Creating a project by *reference* is idempotent on its name, because the
+    same reference means the same code. An upload is not: two uploads under one
+    name may carry different files, and returning the old project as if it were
+    the new one would make the caller run their agents on code they did not
+    send. Pick another name, or delete the old project.
+    """
+
+    code = "project_exists"
+
+    def __init__(self, name: str, project_id: ProjectId) -> None:
+        super().__init__(
+            f"a project named {name!r} already exists", name=name, project_id=str(project_id)
+        )
+        self.name = name
+        self.project_id = project_id
 
 
 class ProjectNotModifiableError(DomainError):

@@ -21,6 +21,7 @@ import { useRunStream } from "./useRunStream";
 import { Candidates } from "./components/Candidates";
 import { ContextTree } from "./components/ContextTree";
 import { Fleet, freeSlots, isLive } from "./components/Fleet";
+import { NewProject, type Upload } from "./components/NewProject";
 import { StartHere } from "./components/StartHere";
 import { Timeline } from "./components/Timeline";
 
@@ -188,6 +189,29 @@ export default function App() {
     setRun(null);
   };
 
+  /*
+   * Not routed through `act`: that helper re-reads the open run afterwards, and
+   * creating a project is the one action after which the open run is no longer
+   * the subject. The new project is appended and selected, and a failure lands
+   * in the same banner as every other one — a rejected upload that vanished
+   * would be read as a project that silently did not appear.
+   */
+  const createProject = async (upload: Upload): Promise<boolean> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await api.uploadProject(upload);
+      setProjects((previous) => [...previous, created]);
+      selectProject(created.id);
+      return true;
+    } catch (exc) {
+      fail(exc);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const startRun = async (objective: string, count: number) => {
     if (!projectId) return;
     await act(async () => {
@@ -240,6 +264,13 @@ export default function App() {
         <aside className="side">
           <section className="panel">
             <header className="panel-head">
+              <h3>New project</h3>
+            </header>
+            <NewProject onCreate={createProject} busy={busy} />
+          </section>
+
+          <section className="panel">
+            <header className="panel-head">
               <h3>Projects</h3>
               {/* Not a badge: a badge means a state worth reacting to, and this
                   is only how many rows the scroller holds. It is here so that a
@@ -266,7 +297,7 @@ export default function App() {
                 </li>
               ))}
               {projects.length === 0 && (
-                <li className="muted">No project yet. Register one, then it is selectable here.</li>
+                <li className="muted">No project yet. Upload one above, then it is selectable here.</li>
               )}
             </ul>
           </section>

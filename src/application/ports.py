@@ -11,20 +11,24 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from application.dto.agent_io import CodeDraft, PlanDraft, ReviewDraft
-from domain.entities.project import Project
+from application.dto.commands import UploadedFile
+from domain.entities.project import Project, ToolchainConfig
 from domain.enums import AgentRole
 from domain.ports.repositories import UnitOfWork
 from domain.ports.tools import ToolExecutor
-from domain.value_objects.identifiers import RunId
+from domain.value_objects.identifiers import ProjectId, RunId
 from domain.value_objects.llm import ChatMessage
 
 __all__ = [
     "AgentOutputCodec",
+    "MaterialisedProject",
     "MetricsExposition",
     "MetricsRecorder",
+    "ProjectFilesStore",
     "PromptRenderer",
     "RenderedPrompt",
     "RunCoordinator",
@@ -108,6 +112,30 @@ class MetricsRecorder(Protocol):
     def increment(self, name: str, value: int = 1, **labels: str) -> None: ...
     def observe(self, name: str, value: float, **labels: str) -> None: ...
     def gauge(self, name: str, value: float, **labels: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialisedProject:
+    """Where an upload landed, and what it looks like it is."""
+
+    path: Path
+    toolchain: ToolchainConfig
+    file_count: int
+
+
+@runtime_checkable
+class ProjectFilesStore(Protocol):
+    """Turns uploaded files into a repository the orchestrator can branch from.
+
+    The store owns the location. Callers never choose a path, which is the
+    whole point: a project whose files live wherever a client said cannot be
+    selected from an interface, and one that shares a mount with every other
+    project runs the agents on whichever code happens to be there.
+    """
+
+    async def materialise(
+        self, project_id: ProjectId, files: Sequence[UploadedFile]
+    ) -> MaterialisedProject: ...
 
 
 @runtime_checkable

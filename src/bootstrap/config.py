@@ -196,6 +196,13 @@ class Settings(BaseSettings):
     max_parallel_candidates: int = 3
 
     # -- filesystem -----------------------------------------------------
+    projects_root: Path = Path("/projects")
+    """Where uploaded projects live, one directory each, chosen by the server.
+
+    Every project used to point at one bind mount; selecting a project in the
+    viewer ran the agents on whatever was mounted. This root replaces that
+    mount, and no client ever chooses a path under it.
+    """
     workspace_root: Path = Path("/var/lib/agentic/workspaces")
     artifact_root: Path = Path("/var/lib/agentic/artifacts")
     prompts_root: Path = Path("prompts")

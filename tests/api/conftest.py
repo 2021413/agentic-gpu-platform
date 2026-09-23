@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -31,6 +32,7 @@ from application.use_cases.projects import (
     GetProjectUseCase,
     ListProjectsUseCase,
     ReplaceProjectToolchainUseCase,
+    UploadProjectUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
@@ -53,6 +55,7 @@ from domain.entities.run import Run
 from domain.exceptions import EntityNotFoundError
 from domain.services.task_complexity import HeuristicTaskComplexityPolicy
 from domain.value_objects.identifiers import RunId
+from infrastructure.projects import LocalProjectFilesStore
 from infrastructure.telemetry import PlatformMetrics, PrometheusExposition
 from interfaces.api.app import create_api
 from interfaces.api.dependencies.container import ApiDependencies
@@ -112,7 +115,7 @@ class _NoApprovals:
 
 
 @pytest.fixture
-def harness() -> Harness:
+def harness(tmp_path: Path) -> Harness:
     store = _Store()
     clock = FakeClock()
     ids = FakeIdGenerator()
@@ -127,6 +130,15 @@ def harness() -> Harness:
         get_project=GetProjectUseCase(uow_factory=uow_factory),
         list_projects=ListProjectsUseCase(uow_factory=uow_factory),
         replace_project_toolchain=ReplaceProjectToolchainUseCase(uow_factory=uow_factory),
+        # The real store on a temporary directory: it only touches the
+        # filesystem and git, and a double of it would prove nothing about
+        # zip handling, which is exactly what the upload tests are for.
+        upload_project=UploadProjectUseCase(
+            uow_factory=uow_factory,
+            clock=clock,
+            ids=ids,
+            files=LocalProjectFilesStore(tmp_path / "projects"),
+        ),
         create_run=CreateRunUseCase(
             uow_factory=uow_factory,
             bus=bus,

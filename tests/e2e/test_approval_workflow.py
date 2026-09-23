@@ -100,15 +100,28 @@ async def test_a_reviewed_run_stops_before_touching_the_repository(
     worker: str,
     sample_repository: Path,
 ) -> None:
-    before = head(sample_repository)
 
     run_id = await waiting_run(client, gated_container, sample_repository)
+    repo = await project_repo(client, gated_container, run_id)
+    before = head(repo)
 
     assert await status_of(client, run_id) == "AWAITING_APPROVAL"
-    assert head(sample_repository) == before, "the patch landed without anyone approving it"
+    assert head(repo) == before, "the patch landed without anyone approving it"
 
     body = (await client.get(f"/v1/runs/{run_id}")).json()
     assert (body.get("run", body))["selected_candidate_id"], "the winner must already be chosen"
+
+
+async def project_repo(client: httpx.AsyncClient, container: Container, run_id: str) -> Path:
+    """The repository the platform actually merges into.
+
+    It is no longer the directory the test uploaded from. Since projects are
+    created by upload, the platform keeps its own copy under `projects_root`
+    and that copy is the one an approval lands in; the original is just what
+    was sent. Asserting on the source directory would always see nothing move.
+    """
+    run = (await client.get(f"/v1/runs/{run_id}")).json()["run"]
+    return container.settings.projects_root / run["project_id"]
 
 
 async def test_approving_lands_the_patch(
@@ -117,14 +130,15 @@ async def test_approving_lands_the_patch(
     worker: str,
     sample_repository: Path,
 ) -> None:
-    before = head(sample_repository)
     run_id = await waiting_run(client, gated_container, sample_repository)
+    repo = await project_repo(client, gated_container, run_id)
+    before = head(repo)  # parked in AWAITING_APPROVAL: nothing has landed yet
 
     response = await client.post(f"/v1/runs/{run_id}/approve")
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "COMPLETED"
-    assert head(sample_repository) != before, "approval did not merge anything"
+    assert head(repo) != before, "approval did not merge anything"
 
 
 async def test_rejecting_sends_the_reason_back_to_the_coder(
@@ -133,15 +147,16 @@ async def test_rejecting_sends_the_reason_back_to_the_coder(
     worker: str,
     sample_repository: Path,
 ) -> None:
-    before = head(sample_repository)
     run_id = await waiting_run(client, gated_container, sample_repository)
+    repo = await project_repo(client, gated_container, run_id)
+    before = head(repo)
 
     response = await client.post(
         f"/v1/runs/{run_id}/reject", json={"reason": "the retry loop never closes the socket"}
     )
 
     assert response.status_code == 200, response.text
-    assert head(sample_repository) == before, "a rejected patch must not land"
+    assert head(repo) == before, "a rejected patch must not land"
     assert await status_of(client, run_id) != "COMPLETED"
 
 

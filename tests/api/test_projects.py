@@ -87,7 +87,7 @@ async def _create(client: httpx.AsyncClient, **toolchain: object) -> str:
         "/v1/projects",
         json={
             "name": "correctable",
-            "local_path": "/projects/current",
+            "repository_url": "https://example.invalid/demo.git",
             "toolchain": {"language": "python", **toolchain},
         },
     )

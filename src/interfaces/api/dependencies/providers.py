@@ -25,6 +25,7 @@ from application.use_cases.projects import (
     GetProjectUseCase,
     ListProjectsUseCase,
     ReplaceProjectToolchainUseCase,
+    UploadProjectUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
@@ -65,6 +66,7 @@ __all__ = [
     "RegisterWorkerDep",
     "ReplaceProjectToolchainDep",
     "ServiceAuthenticatorDep",
+    "UploadProjectDep",
     "WorkerHeartbeatDep",
     "get_dependencies",
 ]
@@ -109,6 +111,10 @@ def get_list_projects(container: ContainerDep) -> ListProjectsUseCase:
 
 def get_replace_project_toolchain(container: ContainerDep) -> ReplaceProjectToolchainUseCase:
     return container.replace_project_toolchain
+
+
+def get_upload_project(container: ContainerDep) -> UploadProjectUseCase:
+    return container.upload_project
 
 
 def get_create_run(container: ContainerDep) -> CreateRunUseCase:
@@ -182,6 +188,7 @@ def get_service_authenticator(container: ContainerDep) -> ServiceAuthenticator:
 CreateProjectDep = Annotated[CreateProjectUseCase, Depends(get_create_project)]
 GetProjectDep = Annotated[GetProjectUseCase, Depends(get_get_project)]
 ListProjectsDep = Annotated[ListProjectsUseCase, Depends(get_list_projects)]
+UploadProjectDep = Annotated[UploadProjectUseCase, Depends(get_upload_project)]
 ReplaceProjectToolchainDep = Annotated[
     ReplaceProjectToolchainUseCase, Depends(get_replace_project_toolchain)
 ]

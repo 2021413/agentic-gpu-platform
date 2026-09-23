@@ -9,10 +9,10 @@ whose every field is a compatibility promise.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Self
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from application.dto.commands import CreateProjectCommand
 from application.dto.views import ProjectView
@@ -62,30 +62,20 @@ class CreateProjectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=200)
-    repository_url: str | None = Field(default=None, max_length=2000)
-    local_path: str | None = Field(default=None, max_length=2000)
+    repository_url: str = Field(min_length=1, max_length=2000)
     default_branch: str = Field(default="main", min_length=1, max_length=255)
     toolchain: ToolchainPayload | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @model_validator(mode="after")
-    def _requires_a_source(self) -> Self:
-        """Duplicates a domain invariant, deliberately.
-
-        ``Project`` refuses to exist without a source and that stays its last
-        line of defence. Re-stating it here is what turns "the server exploded"
-        (500) into "your payload is incomplete" (422), which is the boundary's
-        entire job.
-        """
-        if not self.repository_url and not self.local_path:
-            raise ValueError("either repository_url or local_path must be provided")
-        return self
+    # There is deliberately no `local_path` here any more. A path chosen by a
+    # client is a path on the server, and every project used to share one —
+    # so picking a project ran the agents on whatever was mounted. Files come
+    # in through `POST /v1/projects/upload`; the server decides where they go.
 
     def to_command(self) -> CreateProjectCommand:
         return CreateProjectCommand(
             name=self.name,
             repository_url=self.repository_url,
-            local_path=self.local_path,
             default_branch=self.default_branch,
             toolchain=self.toolchain.to_config() if self.toolchain else None,
             metadata=dict(self.metadata),

@@ -34,6 +34,7 @@ from application.use_cases.projects import (
     GetProjectUseCase,
     ListProjectsUseCase,
     ReplaceProjectToolchainUseCase,
+    UploadProjectUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
@@ -77,6 +78,7 @@ from infrastructure.llm import (
     OpenAICompatibleSettings,
     PromptLibrary,
 )
+from infrastructure.projects import LocalProjectFilesStore
 from infrastructure.queue import (
     InMemoryEventBus,
     InMemoryJobQueue,
@@ -124,6 +126,7 @@ class Container:
     get_project: GetProjectUseCase
     list_projects: ListProjectsUseCase
     replace_project_toolchain: ReplaceProjectToolchainUseCase
+    upload_project: UploadProjectUseCase
     create_run: CreateRunUseCase
     cancel_run: CancelRunUseCase
     get_run: GetRunUseCase
@@ -322,6 +325,12 @@ async def build_container(
         create_project=CreateProjectUseCase(uow_factory=uow_factory, clock=clock, ids=ids),
         get_project=GetProjectUseCase(uow_factory=uow_factory),
         list_projects=ListProjectsUseCase(uow_factory=uow_factory),
+        upload_project=UploadProjectUseCase(
+            uow_factory=uow_factory,
+            clock=clock,
+            ids=ids,
+            files=LocalProjectFilesStore(settings.projects_root),
+        ),
         replace_project_toolchain=ReplaceProjectToolchainUseCase(uow_factory=uow_factory),
         create_run=CreateRunUseCase(
             uow_factory=uow_factory,

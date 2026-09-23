@@ -347,6 +347,51 @@ input:focus, select:focus {
 
 .new-run { margin-bottom: var(--s3); }
 
+/* ── new project ─────────────────────────────────────────────────────── */
+.new-project { display: flex; flex-direction: column; gap: var(--s2); }
+.new-project .row { margin-top: 0; }
+.new-project .warn-inline { margin-top: 0; }
+.pickers { display: flex; gap: var(--s2); }
+
+/* A picker is a button in every respect but the element, so it wears the
+   button's exact rule set; the native control is kept in the tree but off it,
+   so the label opens the dialog and the keyboard still reaches it. */
+.pick {
+  position: relative;
+  display: inline-flex; align-items: center;
+  background: var(--raised);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  font: 500 12px/1.2 var(--sans);
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.pick:hover { background: #1e242c; border-color: #2e3742; }
+.pick:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pick input {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  opacity: 0; cursor: pointer;
+  padding: 0; border: 0;
+}
+
+/* What the next request will carry. A count and a size, tabular, so choosing
+   a different folder changes the digits and nothing around them. */
+.manifest {
+  font: 500 11px/1.4 var(--mono);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+/* "nothing chosen" is the absence of a fact, drawn like every other absence. */
+.manifest.empty { color: var(--text-faint); }
+
 /* The list above is one page of a longer history and the endpoint reports no
    total, so this is the only way to find out what is below it. It sits outside
    the scroller, full width and quiet: it states what the next request will ask
