@@ -286,8 +286,24 @@ fenêtre, donc attendre davantage n'achète qu'un job oisif. Le budget reste
 borné : une flotte qui ne revient jamais fait échouer le run au lieu de le
 tenir ouvert indéfiniment.
 
-Ce qui **reste** : rien de connu sur ce point. Il n'a pas été rejoué contre un
-vrai démarrage à froid — les tests le tiennent, la H100 pas encore.
+**Vérifié sur la pile réelle, Redis compris**, en remettant la flotte à zéro
+et en créant un run — ce qui ne coûte pas un centime de GPU, puisque aucun
+modèle n'est appelé :
+
+```
+avant            après
+11:20:24         11:13:47   RETRY_OTHER_WORKER
+11:20:26         11:14:33   RETRY_OTHER_WORKER      (+46 s)
+11:20:28         11:15:19   FAIL                    (+46 s)
+```
+
+Et l'exécution a trouvé un second bug que les tests ne voyaient pas. Deux lignes
+après le `release(not_before=…)`, l'orchestrateur republie le job avec
+`enqueue()`, ce qui le remettait aussitôt dans l'ensemble « prêt » et annulait
+le délai qui venait d'être posé. Un requeue est **deux appels**, et tester
+`release` isolément restait vert pendant que la production ne l'était pas. Le
+double de test ne surveillait que `release` : il était aveugle précisément au
+bug qui comptait. La suite de contrat rejoue maintenant la séquence complète.
 
 ---
 

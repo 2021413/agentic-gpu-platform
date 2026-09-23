@@ -341,10 +341,19 @@ class FakeJobQueue:
         self._queued: list[Job] = []
         self._leased: dict[JobId, tuple[Job, Lease]] = {}
         self.deferred: dict[JobId, datetime | None] = {}
+        """When each job was last asked to become claimable again.
+
+        Written by both `enqueue` and `release`, because the two together
+        are one requeue and it was the publication that silently cancelled
+        the delay in production. A double watching only `release` was blind
+        to exactly the bug worth catching.
+        """
+        self.deferred: dict[JobId, datetime | None] = {}
         """When each released job was asked to become claimable again."""
         self.enqueued: list[JobId] = []
 
-    async def enqueue(self, job: Job) -> None:
+    async def enqueue(self, job: Job, *, not_before: datetime | None = None) -> None:
+        self.deferred[job.id] = not_before
         if any(j.id == job.id for j in self._queued) or job.id in self._leased:
             return  # at-least-once delivery must not duplicate work
         self._queued.append(job)

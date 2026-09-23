@@ -38,8 +38,9 @@ CLEAR_LEASE = (
 )
 
 ENQUEUE = """
--- KEYS: job hash, ready set for the job type, run index
--- ARGV: job id, queue score, then the job record as field/value pairs
+-- KEYS: job hash, ready set for the job type, run index, delayed set
+-- ARGV: job id, queue score, ready-at ms ('0' for now), then the job record
+--       as field/value pairs
 local status = redis.call('HGET', KEYS[1], 'status')
 if status == 'LEASED' or status == 'RUNNING' then
   -- Republishing a job somebody is holding would hand the same work to a
@@ -50,8 +51,17 @@ if redis.call('HGET', KEYS[1], 'acked') == '1' then
   -- The acknowledgement tombstone: this job is finished and must not come back.
   return 0
 end
-redis.call('HSET', KEYS[1], unpack(ARGV, 3))
-redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[1])
+redis.call('HSET', KEYS[1], unpack(ARGV, 4))
+if ARGV[3] == '0' then
+  redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[1])
+  redis.call('ZREM', KEYS[4], ARGV[1])
+else
+  -- Published, but not yet offered. Republishing a job that a release has just
+  -- deferred must not hand it straight back to the next consumer: a requeue is
+  -- release-then-publish, and the second call used to undo the first.
+  redis.call('ZADD', KEYS[4], tonumber(ARGV[3]), ARGV[1])
+  redis.call('ZREM', KEYS[2], ARGV[1])
+end
 redis.call('SADD', KEYS[3], ARGV[1])
 return 1
 """

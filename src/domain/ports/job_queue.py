@@ -23,8 +23,16 @@ __all__ = ["JobQueue"]
 class JobQueue(Protocol):
     """Transport for schedulable work. Durable state lives in PostgreSQL."""
 
-    async def enqueue(self, job: Job) -> None:
-        """Publish a job. Enqueuing the same job twice must not duplicate work."""
+    async def enqueue(self, job: Job, *, not_before: datetime | None = None) -> None:
+        """Publish a job. Enqueuing the same job twice must not duplicate work.
+
+        ``not_before`` defers it exactly as in ``release``. It is here because a
+        requeue is two calls — release the lease, then republish — and a
+        publication that ignored the delay would undo the release that had just
+        honoured it. That is not hypothetical: it is what happened, and the
+        symptom was three attempts two seconds apart against an empty fleet
+        while the tests for `release` alone were green.
+        """
         ...
 
     async def claim(

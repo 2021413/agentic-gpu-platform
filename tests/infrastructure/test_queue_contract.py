@@ -385,6 +385,49 @@ async def test_waiting_does_not_cost_a_job_its_place(
     assert due[0].id == first.id, "the older job waited; it did not lose its turn"
 
 
+async def test_republishing_a_deferred_job_does_not_cancel_its_delay(
+    queue: JobQueue, consumer: WorkerId
+) -> None:
+    """A requeue is two calls: release the lease, then publish the record again.
+
+    Testing `release` on its own was green while production was not. The
+    orchestrator publishes the updated record straight after releasing it, and
+    a publication that ignored the delay put the job back in the ready set two
+    lines after the release had taken it out — three attempts, two seconds
+    apart, against a fleet that needed two minutes to produce a worker.
+    """
+    job = make_job()
+    await queue.enqueue(job)
+    claimed = await claim(queue, consumer)
+    assert claimed is not None
+
+    await queue.release(
+        job_id=job.id, token=claimed[1].token, requeue=True, not_before=later(30)
+    )
+    await queue.enqueue(job, not_before=later(30))
+
+    assert await claim(queue, WorkerId.generate(), at=5) is None
+    assert await claim(queue, WorkerId.generate(), at=31) is not None
+
+
+async def test_publishing_without_a_delay_clears_an_earlier_one(
+    queue: JobQueue, consumer: WorkerId
+) -> None:
+    """The two adapters must agree on the other direction too: a fresh
+    publication with no delay is a statement that the job is claimable now."""
+    job = make_job()
+    await queue.enqueue(job)
+    claimed = await claim(queue, consumer)
+    assert claimed is not None
+    await queue.release(
+        job_id=job.id, token=claimed[1].token, requeue=True, not_before=later(30)
+    )
+
+    await queue.enqueue(job)
+
+    assert await claim(queue, WorkerId.generate(), at=1) is not None
+
+
 async def test_an_immediate_requeue_is_still_immediate(
     queue: JobQueue, consumer: WorkerId
 ) -> None:

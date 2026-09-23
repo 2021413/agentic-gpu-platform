@@ -884,6 +884,7 @@ class RunOrchestrator:
         _log.warning("job %s (%s) failed: %s -> %s", job.id, job.type, exc, decision.action)
 
         now = self._clock.now()
+        deferred_until = (now + decision.delay) if decision.delay else None
         async with self._uow_factory() as uow:
             run = await uow.runs.get(job.run_id)
             retryable = decision.should_retry_job
@@ -910,7 +911,7 @@ class RunOrchestrator:
             job_id=job.id,
             token=lease.token,
             requeue=decision.should_retry_job,
-            not_before=(now + decision.delay) if decision.delay else None,
+            not_before=deferred_until,
         )
         if decision.should_retry_job:
             async with self._uow_factory() as uow:
@@ -920,7 +921,10 @@ class RunOrchestrator:
                     await uow.jobs.update(stored)
                     uow.collect(stored)
                     await commit_and_publish(uow, self._bus)
-                    await self._queue.enqueue(stored)
+                    # Same instant as the release above: the two calls are one
+                    # requeue, and disagreeing about the delay means the second
+                    # silently cancels the first.
+                    await self._queue.enqueue(stored, not_before=deferred_until)
         else:
             await self._advance(job.run_id)
 

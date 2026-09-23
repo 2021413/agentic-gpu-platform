@@ -107,7 +107,7 @@ class InMemoryJobQueue:
         self._acknowledged: set[JobId] = set()
 
     # -- publication ----------------------------------------------------
-    async def enqueue(self, job: Job) -> None:
+    async def enqueue(self, job: Job, *, not_before: datetime | None = None) -> None:
         """Publish a job. Enqueuing the same job twice must not duplicate work."""
         async with self._lock:
             stored = self._jobs.get(job.id)
@@ -118,6 +118,12 @@ class InMemoryJobQueue:
             score = queue_score(job.priority, job.created_at)
             self._jobs[job.id] = _rebuild(job, status=JobStatus.QUEUED)
             self._scores[job.id] = score
+            # A republication that dropped the delay would undo the release
+            # that had just applied it; a requeue is both calls together.
+            if not_before is None:
+                self._delayed.pop(job.id, None)
+            else:
+                self._delayed[job.id] = not_before
             self._ready.setdefault(job.type, {})[job.id] = score
             self._runs.setdefault(job.run_id, set()).add(job.id)
 

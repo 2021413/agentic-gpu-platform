@@ -106,7 +106,7 @@ class RedisJobQueue:
         self._cancel = redis.register_script(scripts.CANCEL_RUN_JOBS)
 
     # -- publication ----------------------------------------------------
-    async def enqueue(self, job: Job) -> None:
+    async def enqueue(self, job: Job, *, not_before: datetime | None = None) -> None:
         """Publish a job.
 
         The stored status is forced to ``QUEUED``: sitting in the ready set is
@@ -121,8 +121,14 @@ class RedisJobQueue:
                 self._keys.job(job.id),
                 self._keys.ready(job.type),
                 self._keys.run_jobs(job.run_id),
+                self._keys.delayed(job.type),
             ],
-            args=[str(job.id), queue_score(job.priority, job.created_at), *_flatten(record)],
+            args=[
+                str(job.id),
+                queue_score(job.priority, job.created_at),
+                _epoch_ms(not_before) if not_before is not None else "0",
+                *_flatten(record),
+            ],
         )
 
     # -- consumption ----------------------------------------------------
