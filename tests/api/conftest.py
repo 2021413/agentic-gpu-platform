@@ -55,7 +55,7 @@ from domain.entities.run import Run
 from domain.exceptions import EntityNotFoundError
 from domain.services.task_complexity import HeuristicTaskComplexityPolicy
 from domain.value_objects.identifiers import RunId
-from infrastructure.projects import LocalProjectFilesStore
+from infrastructure.projects import LocalProjectFilesStore, missing_executable
 from infrastructure.telemetry import PlatformMetrics, PrometheusExposition
 from interfaces.api.app import create_api
 from interfaces.api.dependencies.container import ApiDependencies
@@ -129,7 +129,9 @@ def harness(tmp_path: Path) -> Harness:
         create_project=CreateProjectUseCase(uow_factory=uow_factory, clock=clock, ids=ids),
         get_project=GetProjectUseCase(uow_factory=uow_factory),
         list_projects=ListProjectsUseCase(uow_factory=uow_factory),
-        replace_project_toolchain=ReplaceProjectToolchainUseCase(uow_factory=uow_factory),
+        replace_project_toolchain=ReplaceProjectToolchainUseCase(
+            uow_factory=uow_factory, command_probe=missing_executable
+        ),
         # The real store on a temporary directory: it only touches the
         # filesystem and git, and a double of it would prove nothing about
         # zip handling, which is exactly what the upload tests are for.
@@ -138,6 +140,7 @@ def harness(tmp_path: Path) -> Harness:
             clock=clock,
             ids=ids,
             files=LocalProjectFilesStore(tmp_path / "projects"),
+            command_probe=missing_executable,
         ),
         create_run=CreateRunUseCase(
             uow_factory=uow_factory,

@@ -146,3 +146,42 @@ async def test_the_json_route_no_longer_accepts_a_path(client: httpx.AsyncClient
     )
 
     assert response.status_code == 422
+
+
+# -- a sentence is not a command ---------------------------------------------
+async def test_a_command_that_cannot_start_is_refused_before_anything_is_spent(
+    client: httpx.AsyncClient,
+) -> None:
+    """Observed: a test command of `analyse ce projet`, typed into a field that
+    looked like it wanted a sentence. It was accepted, the planner and coder
+    ran on the GPU, and only validation said `No such file or directory`."""
+    response = await upload(client, "sentence", test_command="analyse ce projet")
+
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "toolchain_command_unavailable"
+    assert "'analyse'" in body["detail"], "the word that was not a program is named"
+    assert (await client.get("/v1/projects")).json() == [], "nothing was created"
+
+
+async def test_a_real_command_is_accepted(client: httpx.AsyncClient) -> None:
+    """The probe must not be so eager that legitimate commands fail it."""
+    response = await upload(client, "ok", test_command="true")
+
+    assert response.status_code == 201, response.text
+    assert response.json()["toolchain"]["test_command"] == "true"
+
+
+async def test_correcting_a_toolchain_to_a_sentence_is_refused_too(
+    client: httpx.AsyncClient,
+) -> None:
+    """The second door has the same lock: PUT /toolchain used to accept anything."""
+    project = (await upload(client, "demo")).json()
+
+    response = await client.put(
+        f"/v1/projects/{project['id']}/toolchain",
+        json={"language": "python", "test_command": "lance les tests"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "toolchain_command_unavailable"

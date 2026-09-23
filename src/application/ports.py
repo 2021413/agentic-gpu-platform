@@ -25,6 +25,7 @@ from domain.value_objects.llm import ChatMessage
 
 __all__ = [
     "AgentOutputCodec",
+    "CommandProbe",
     "MaterialisedProject",
     "MetricsExposition",
     "MetricsRecorder",
@@ -121,6 +122,17 @@ class MaterialisedProject:
     path: Path
     toolchain: ToolchainConfig
     file_count: int
+
+
+class CommandProbe(Protocol):
+    """Answers whether a toolchain command could start where the tools run.
+
+    Returns the executable it could not find, or ``None`` when the command is
+    fine (or absent). A callable rather than a boolean so the refusal can name
+    the word that was not a program.
+    """
+
+    def __call__(self, command: str | None) -> str | None: ...
 
 
 @runtime_checkable

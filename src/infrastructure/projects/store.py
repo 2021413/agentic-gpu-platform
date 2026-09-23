@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import zipfile
@@ -31,7 +32,7 @@ from domain.entities.project import ToolchainConfig
 from domain.exceptions import ProjectUploadError
 from domain.value_objects.identifiers import ProjectId
 
-__all__ = ["MAX_UPLOAD_BYTES", "LocalProjectFilesStore", "detect_toolchain"]
+__all__ = ["MAX_UPLOAD_BYTES", "LocalProjectFilesStore", "detect_toolchain", "missing_executable"]
 
 # Generous for source code, and a hard stop for anything that is not. A zip
 # that expands to more than this is refused before a byte is written, because
@@ -200,6 +201,34 @@ def detect_toolchain(root: Path) -> ToolchainConfig:
     test = next((f"make {target}" for target in ("test", "check") if target in targets), None)
     language = "cpp" if any(root.rglob("*.cpp")) else "c"
     return ToolchainConfig(language=language, build_command="make -j4", test_command=test)
+
+
+def missing_executable(command: str | None) -> str | None:
+    """The executable a command names, if it cannot be found where tools run.
+
+    Tools are child processes of this very service, so `shutil.which` here
+    answers the same question the sandbox will ask. It is asked at upload time
+    because the alternative was observed: a test command of `analyse ce projet`
+    — a sentence, typed into a field that looked like it wanted one — was
+    accepted, the planner and the coder were paid for on the GPU, and only then
+    did validation report `[Errno 2] No such file or directory`. A command that
+    cannot start is refused before a run is spent on it, with its first word
+    named, which is what `run-on.sh` already did in shell.
+
+    ``None`` when there is nothing to object to, including no command at all.
+    """
+    if not command or not command.strip():
+        return None
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command.strip().split()[0]
+    if not words:
+        return None
+    executable = words[0]
+    if "/" in executable:
+        return None if Path(executable).exists() else executable
+    return None if shutil.which(executable) else executable
 
 
 @dataclass(frozen=True, slots=True)

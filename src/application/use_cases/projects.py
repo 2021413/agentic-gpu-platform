@@ -10,12 +10,13 @@ from application.dto.commands import (
     UploadProjectCommand,
 )
 from application.dto.views import ProjectView
-from application.ports import ProjectFilesStore, UnitOfWorkFactory
+from application.ports import CommandProbe, ProjectFilesStore, UnitOfWorkFactory
 from domain.entities.project import Project, ToolchainConfig
 from domain.exceptions import (
     EntityNotFoundError,
     ProjectAlreadyExistsError,
     ProjectNotModifiableError,
+    ToolchainCommandUnavailableError,
 )
 from domain.ports.clock import Clock, IdGenerator
 from domain.value_objects.identifiers import ProjectId
@@ -60,6 +61,23 @@ class CreateProjectUseCase:
             return ProjectView.of(project)
 
 
+def _refuse_unstartable(toolchain: ToolchainConfig, probe: CommandProbe) -> None:
+    """Refuse a toolchain whose commands cannot start, naming the first word.
+
+    Only ever a refusal, never a silent drop: turning a command the caller
+    typed into "no command" would record validation as "did not run" and let
+    a run proceed on the belief that nothing was asked of it.
+    """
+    for field, command in (
+        ("build_command", toolchain.build_command),
+        ("test_command", toolchain.test_command),
+        ("static_analysis_command", toolchain.static_analysis_command),
+    ):
+        executable = probe(command)
+        if executable is not None and command is not None:
+            raise ToolchainCommandUnavailableError(field, command, executable)
+
+
 class UploadProjectUseCase:
     """Create a project from uploaded files.
 
@@ -80,17 +98,31 @@ class UploadProjectUseCase:
         clock: Clock,
         ids: IdGenerator,
         files: ProjectFilesStore,
+        command_probe: CommandProbe,
     ) -> None:
         self._uow_factory = uow_factory
         self._clock = clock
         self._ids = ids
         self._files = files
+        self._probe = command_probe
 
     async def execute(self, command: UploadProjectCommand) -> ProjectView:
         async with self._uow_factory() as uow:
             existing = await uow.projects.get_by_name(command.name)
             if existing is not None:
                 raise ProjectAlreadyExistsError(command.name, existing.id)
+
+        # The caller's own commands are checked before a byte is written: a
+        # sentence typed where a command belongs must not cost an upload, let
+        # alone a run.
+        _refuse_unstartable(
+            ToolchainConfig(
+                language=command.language or "unknown",
+                build_command=command.build_command,
+                test_command=command.test_command,
+            ),
+            self._probe,
+        )
 
         project_id = self._ids.next_id(ProjectId)
         stored = await self._files.materialise(project_id, command.files)
@@ -136,10 +168,15 @@ class ReplaceProjectToolchainUseCase:
     at the price of leaving the run history behind.
     """
 
-    def __init__(self, *, uow_factory: UnitOfWorkFactory) -> None:
+    def __init__(
+        self, *, uow_factory: UnitOfWorkFactory, command_probe: CommandProbe | None = None
+    ) -> None:
         self._uow_factory = uow_factory
+        self._probe = command_probe
 
     async def execute(self, command: ReplaceProjectToolchainCommand) -> ProjectView:
+        if self._probe is not None:
+            _refuse_unstartable(command.toolchain, self._probe)
         async with self._uow_factory() as uow:
             project = await uow.projects.get(command.project_id)
             if project is None:

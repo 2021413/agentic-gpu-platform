@@ -157,21 +157,32 @@ export function NewProject({
         {skipped > 0 && ` · ${skipped} skipped`}
       </span>
 
+      {/* These two fields were read as "what should the agents do": someone
+          typed a sentence into the test command, it was accepted, and a run
+          was spent before validation reported that no program by that name
+          exists. The heading, the monospace placeholders and the sentence
+          about the objective are all there to make the mistake hard. */}
+      <p className="field-head">
+        Shell commands the project runs on <em>itself</em> to check a change.
+        Detected from the files when left empty. What the agents should do is
+        asked when you start a run, not here.
+      </p>
       <input
+        className="command"
         value={build}
         onChange={(e) => setBuild(e.target.value)}
-        placeholder="Build command"
-        aria-label="Build command"
+        placeholder="build, e.g. make"
+        aria-label="Build command, a shell command"
+        spellCheck={false}
       />
       <input
+        className="command"
         value={test}
         onChange={(e) => setTest(e.target.value)}
-        placeholder="Test command"
-        aria-label="Test command"
+        placeholder="test, e.g. pytest -q"
+        aria-label="Test command, a shell command"
+        spellCheck={false}
       />
-      <small className="muted small">
-        Language, build and test are detected from the files when left empty.
-      </small>
 
       {refusal && <small className="warn-inline">{refusal}</small>}
 

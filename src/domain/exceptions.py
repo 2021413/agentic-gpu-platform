@@ -32,6 +32,7 @@ __all__ = [
     "RunCancelledError",
     "StructuredOutputError",
     "ToolExecutionError",
+    "ToolchainCommandUnavailableError",
     "WorkerUnavailableError",
     "WorkspaceError",
 ]
@@ -313,6 +314,32 @@ class ProjectAlreadyExistsError(DomainError):
         )
         self.name = name
         self.project_id = project_id
+
+
+class ToolchainCommandUnavailableError(DomainError):
+    """A build or test command names an executable that does not exist where
+    the tools run.
+
+    Refused when the toolchain is set, not discovered when a run reaches
+    validation: the observed alternative was a test command of `analyse ce
+    projet`, accepted at upload, with the planner and coder paid for on the
+    GPU before `[Errno 2] No such file or directory` said the command could
+    never have started. Naming the executable is what lets the caller see
+    that a sentence was typed where a command belongs.
+    """
+
+    code = "toolchain_command_unavailable"
+
+    def __init__(self, field: str, command: str, executable: str) -> None:
+        super().__init__(
+            f"{field} names {executable!r}, which is not an executable where the "
+            f"project's tools run; it must be a shell command such as 'pytest -q'",
+            field=field,
+            command=command,
+            executable=executable,
+        )
+        self.field = field
+        self.executable = executable
 
 
 class ProjectNotModifiableError(DomainError):

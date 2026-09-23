@@ -78,7 +78,7 @@ from infrastructure.llm import (
     OpenAICompatibleSettings,
     PromptLibrary,
 )
-from infrastructure.projects import LocalProjectFilesStore
+from infrastructure.projects import LocalProjectFilesStore, missing_executable
 from infrastructure.queue import (
     InMemoryEventBus,
     InMemoryJobQueue,
@@ -330,8 +330,11 @@ async def build_container(
             clock=clock,
             ids=ids,
             files=LocalProjectFilesStore(settings.projects_root),
+            command_probe=missing_executable,
         ),
-        replace_project_toolchain=ReplaceProjectToolchainUseCase(uow_factory=uow_factory),
+        replace_project_toolchain=ReplaceProjectToolchainUseCase(
+            uow_factory=uow_factory, command_probe=missing_executable
+        ),
         create_run=CreateRunUseCase(
             uow_factory=uow_factory,
             bus=bus,

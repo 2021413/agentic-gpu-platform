@@ -17,7 +17,7 @@ import pytest
 from application.dto.commands import UploadedFile
 from domain.exceptions import ProjectUploadError
 from domain.value_objects.identifiers import ProjectId
-from infrastructure.projects import LocalProjectFilesStore, detect_toolchain
+from infrastructure.projects import LocalProjectFilesStore, detect_toolchain, missing_executable
 
 
 def zipped(entries: dict[str, bytes]) -> bytes:
@@ -197,3 +197,18 @@ def test_an_unrecognised_project_gets_no_commands_at_all(tmp_path: Path) -> None
     assert toolchain.language == "unknown"
     assert toolchain.build_command is None
     assert toolchain.test_command is None
+
+
+# -- the command probe -------------------------------------------------------
+def test_a_sentence_names_its_first_word_as_the_missing_executable() -> None:
+    assert missing_executable("analyse ce projet") == "analyse"
+
+
+def test_a_command_that_exists_passes() -> None:
+    assert missing_executable("true") is None
+    assert missing_executable("/bin/true --anything") is None
+
+
+def test_no_command_is_not_a_missing_one() -> None:
+    assert missing_executable(None) is None
+    assert missing_executable("   ") is None
