@@ -6,6 +6,12 @@
  * a gap in the timeline. Events are kept in arrival order and deduplicated by
  * sequence, because the server's own contract is "a handful of duplicates,
  * never a gap".
+ *
+ * That contract is checked rather than trusted. A replay the server cannot
+ * serve in full arrives looking exactly like a complete one — the frames are
+ * ordered and the timeline reads as continuous — and the only evidence left is
+ * a sequence number that never comes. So this hook counts them and hands the
+ * count out, and the timeline says so.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -13,14 +19,26 @@ import { runEventsUrl, type RunEvent } from "./api";
 
 export type StreamState = "connecting" | "open" | "closed";
 
+/** What a replay failed to deliver, once the client can prove it failed. */
+export interface StreamGap {
+  /** How many sequence numbers never arrived. */
+  missing: number;
+  /** The first of them, which is where the hole in the timeline starts. */
+  from: number;
+}
+
 export function useRunStream(runId: string | null) {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [state, setState] = useState<StreamState>("closed");
+  const [gap, setGap] = useState<StreamGap | null>(null);
   const seen = useRef<Set<number>>(new Set());
+  const expected = useRef(1);
 
   useEffect(() => {
     setEvents([]);
+    setGap(null);
     seen.current = new Set();
+    expected.current = 1;
     if (!runId) {
       setState("closed");
       return;
@@ -40,6 +58,25 @@ export function useRunStream(runId: string | null) {
       }
       if (typeof frame.sequence === "number") {
         if (seen.current.has(frame.sequence)) return;
+        /*
+         * A sequence is allocated per run, starts at 1 and has no holes: the
+         * event store takes MAX+1 under an advisory lock inside the appending
+         * transaction, so a rolled-back append consumes no number. A number
+         * that never arrives is therefore an event the replay could not hand
+         * over, not an artefact of the numbering — and it is the only trace it
+         * leaves, because the frames that do arrive are in order and read as a
+         * continuous run. Live frames carry no sequence and are skipped here:
+         * they have no cursor yet and prove nothing about the history.
+         */
+        if (frame.sequence > expected.current) {
+          const first = expected.current;
+          const lost = frame.sequence - first;
+          setGap((previous) => ({
+            missing: (previous?.missing ?? 0) + lost,
+            from: previous?.from ?? first,
+          }));
+        }
+        expected.current = Math.max(expected.current, frame.sequence + 1);
         seen.current.add(frame.sequence);
       }
       setEvents((previous) => [...previous, frame]);
@@ -58,7 +95,7 @@ export function useRunStream(runId: string | null) {
     };
   }, [runId]);
 
-  return { events, state };
+  return { events, state, gap };
 }
 
 /**

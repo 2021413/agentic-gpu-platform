@@ -11,7 +11,6 @@ repository's, otherwise a half-written run could survive a failed step.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -25,7 +24,7 @@ from domain.entities.project import Project
 from domain.entities.review import Review
 from domain.entities.run import Run
 from domain.entities.worker import Worker
-from domain.enums import JobStatus, RunStatus
+from domain.enums import RunStatus
 from domain.events.base import DomainEvent
 from domain.exceptions import EntityNotFoundError
 from domain.value_objects.identifiers import (
@@ -87,7 +86,6 @@ __all__ = [
 ]
 
 _TERMINAL_RUN_STATUSES = tuple(status.value for status in RunStatus if status.is_terminal)
-_IN_FLIGHT_JOB_STATUSES = (JobStatus.LEASED.value, JobStatus.RUNNING.value)
 
 # Namespace for the advisory locks that serialize event sequence allocation.
 # Any constant works as long as nothing else in the platform reuses it.
@@ -190,13 +188,6 @@ class SqlAlchemyRunRepository(_Repository):
         )
         return [run_to_domain(model) for model in await self._scalars(statement)]
 
-    async def count_by_status(self) -> dict[RunStatus, int]:
-        """Only the statuses actually present are returned; absent means zero."""
-        rows = await self._session.execute(
-            select(RunModel.status, func.count()).group_by(RunModel.status)
-        )
-        return {RunStatus(status): count for status, count in rows.all()}
-
 
 class SqlAlchemyJobRepository(_Repository):
     """Implements ``domain.ports.repositories.JobRepository``."""
@@ -225,34 +216,6 @@ class SqlAlchemyJobRepository(_Repository):
             select(JobModel)
             .where(JobModel.run_id == run_id.value)
             .order_by(JobModel.created_at, JobModel.id)
-        )
-        return [job_to_domain(model) for model in await self._scalars(statement)]
-
-    async def list_by_status(self, status: JobStatus, *, limit: int = 100) -> Sequence[Job]:
-        statement = (
-            select(JobModel)
-            .where(JobModel.status == status.value)
-            .order_by(JobModel.created_at, JobModel.id)
-            .limit(limit)
-        )
-        return [job_to_domain(model) for model in await self._scalars(statement)]
-
-    async def list_expired_leases(self, *, now: datetime, limit: int = 100) -> Sequence[Job]:
-        """Jobs whose holder went silent, oldest expiry first.
-
-        Restricted to in-flight statuses: a job that already failed or finished
-        may still carry lease columns, and reclaiming it would resurrect work
-        nobody is waiting for.
-        """
-        statement = (
-            select(JobModel)
-            .where(
-                JobModel.lease_expires_at.is_not(None),
-                JobModel.lease_expires_at <= now,
-                JobModel.status.in_(_IN_FLIGHT_JOB_STATUSES),
-            )
-            .order_by(JobModel.lease_expires_at)
-            .limit(limit)
         )
         return [job_to_domain(model) for model in await self._scalars(statement)]
 
@@ -352,15 +315,6 @@ class SqlAlchemyReviewRepository(_Repository):
             .order_by(ReviewModel.iteration)
         )
         return [review_to_domain(model) for model in await self._scalars(statement)]
-
-    async def latest_for_candidate(self, candidate_id: CandidateId) -> Review | None:
-        model = await self._session.scalar(
-            select(ReviewModel)
-            .where(ReviewModel.candidate_id == candidate_id.value)
-            .order_by(ReviewModel.iteration.desc())
-            .limit(1)
-        )
-        return review_to_domain(model) if model else None
 
 
 class SqlAlchemyToolResultRepository(_Repository):

@@ -7,6 +7,7 @@
  */
 
 import type { RunEvent } from "../api";
+import type { StreamGap } from "../useRunStream";
 import { ago, useNow } from "../time";
 
 const TONE: Record<string, string> = {
@@ -55,7 +56,15 @@ function describe(event: RunEvent): string {
   }
 }
 
-export function Timeline({ events, state }: { events: RunEvent[]; state: string }) {
+export function Timeline({
+  events,
+  state,
+  gap,
+}: {
+  events: RunEvent[];
+  state: string;
+  gap: StreamGap | null;
+}) {
   const now = useNow();
 
   return (
@@ -64,6 +73,16 @@ export function Timeline({ events, state }: { events: RunEvent[]; state: string 
         <h3>Timeline</h3>
         <span className={`stream ${state}`}>{state}</span>
       </header>
+      {/* The one thing the rows below cannot say for themselves. A replay the
+          server could not serve in full leaves a timeline that looks whole, so
+          the shortfall is stated in words, in the warn vocabulary, above the
+          events it applies to. */}
+      {gap && (
+        <p className="warn-inline">
+          replay incomplete: {gap.missing} event{gap.missing === 1 ? "" : "s"} from sequence{" "}
+          {gap.from} were not delivered, so what follows is not the whole run
+        </p>
+      )}
       {events.length === 0 && (
         <p className="muted">No event yet. Each one appears here as the run emits it.</p>
       )}

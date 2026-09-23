@@ -26,10 +26,33 @@ import { Timeline } from "./components/Timeline";
 
 const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 
+/*
+ * How many runs one request asks for. The endpoint's own default, and well
+ * under its maximum of 200, so a project with a long history costs several
+ * small reads rather than one large one that still might not be the end.
+ */
+const RUNS_PAGE = 2;
+
+/**
+ * Fold a freshly read first page into the runs already on screen.
+ *
+ * The list is ordered by creation, newest first, so a run's place in it never
+ * changes once it exists: the fresh page is the head of the same list, and
+ * everything already loaded below it still belongs below it.
+ */
+function mergeFirstPage(fresh: Run[], known: Run[]): Run[] {
+  const ids = new Set(fresh.map((r) => r.id));
+  return [...fresh, ...known.filter((r) => !ids.has(r.id))];
+}
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  // False until a short page has proved there is nothing older. The API returns
+  // no total, so this is the only honest end-of-list signal there is.
+  const [runsComplete, setRunsComplete] = useState(false);
+  const [loadingRuns, setLoadingRuns] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
@@ -38,7 +61,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const { events, state } = useRunStream(runId);
+  const { events, state, gap } = useRunStream(runId);
 
   const fail = (exc: unknown) => setError(exc instanceof Error ? exc.message : String(exc));
 
@@ -57,9 +80,40 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    setRuns([]);
+    setRunsComplete(false);
     if (!projectId) return;
-    api.runs(projectId).then(setRuns).catch(fail);
+    let current = true;
+    api
+      .runs(projectId, { limit: RUNS_PAGE, offset: 0 })
+      .then((page) => {
+        if (!current) return;
+        setRuns(page);
+        setRunsComplete(page.length < RUNS_PAGE);
+      })
+      .catch(fail);
+    return () => {
+      current = false;
+    };
   }, [projectId]);
+
+  /** Ask for the page after the runs already held, and note when it is the last. */
+  const loadOlderRuns = async () => {
+    if (!projectId) return;
+    setLoadingRuns(true);
+    try {
+      const page = await api.runs(projectId, { limit: RUNS_PAGE, offset: runs.length });
+      setRuns((previous) => {
+        const ids = new Set(previous.map((r) => r.id));
+        return [...previous, ...page.filter((r) => !ids.has(r.id))];
+      });
+      setRunsComplete(page.length < RUNS_PAGE);
+    } catch (exc) {
+      fail(exc);
+    } finally {
+      setLoadingRuns(false);
+    }
+  };
 
   const refreshRun = useCallback(async () => {
     if (!runId) return;
@@ -72,7 +126,14 @@ export default function App() {
       setRun(detail);
       setCandidates(cands);
       setReviews(revs);
-      if (projectId) setRuns(await api.runs(projectId));
+      if (projectId) {
+        // Only the first page is re-read: it holds every run whose status can
+        // still change, and refetching the whole history on each event would
+        // undo the paging below it.
+        const head = await api.runs(projectId, { limit: RUNS_PAGE, offset: 0 });
+        setRuns((previous) => mergeFirstPage(head, previous));
+        if (head.length < RUNS_PAGE) setRunsComplete(true);
+      }
     } catch (exc) {
       fail(exc);
     }
@@ -206,6 +267,14 @@ export default function App() {
             <section className="panel">
               <header className="panel-head">
                 <h3>Runs</h3>
+                {/* The same count as the projects panel, with one difference the
+                    API forces: it returns no total, so until a short page has
+                    proved otherwise this number is a floor, and the plus says
+                    so instead of letting fifty pass for all of them. */}
+                <span className="count">
+                  {runs.length}
+                  {runsComplete ? "" : "+"}
+                </span>
               </header>
               <NewRun onStart={startRun} busy={busy} />
               <ul className="list">
@@ -227,6 +296,11 @@ export default function App() {
                   <li className="muted">No run yet. Type an objective above to start the first.</li>
                 )}
               </ul>
+              {!runsComplete && (
+                <button className="more" disabled={loadingRuns} onClick={() => void loadOlderRuns()}>
+                  {loadingRuns ? "reading…" : `load ${RUNS_PAGE} older runs`}
+                </button>
+              )}
             </section>
           )}
 
@@ -289,7 +363,7 @@ export default function App() {
 
               {latestManifest && <ContextTree manifest={latestManifest} />}
               <Candidates runId={run.id} candidates={candidates} reviews={reviews} />
-              <Timeline events={events} state={state} />
+              <Timeline events={events} state={state} gap={gap} />
             </>
           )}
         </main>

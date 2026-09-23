@@ -22,7 +22,7 @@ tests/application/test_settings.py:8: in <module>
     from bootstrap.config import Environment, Settings, WorkerSettings
 src/bootstrap/config.py:216: in <module>
     class WorkerSettings(BaseSettings):
-/opt/venv/lib/python3.12/site-packages/pydantic/_internal/_generate_schema.py:239: in check_decorator_fields_exist
+pydantic/_internal/_generate_schema.py:239: in check_decorator_fields_exist
     raise PydanticUserError(
 E   pydantic.errors.PydanticUserError: check_decorator_fields_exist
 """

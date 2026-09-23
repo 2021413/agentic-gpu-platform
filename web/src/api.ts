@@ -172,8 +172,19 @@ export const api = {
     toolchain: { language: string; build_command: string | null; test_command: string | null };
   }) => request<Project>("/v1/projects", { method: "POST", body: JSON.stringify(body) }),
 
-  runs: (projectId: string) =>
-    request<{ runs: Run[] }>(`/v1/projects/${projectId}/runs?limit=50`).then((r) => r.runs),
+  /**
+   * One page of a project's runs, newest first.
+   *
+   * The endpoint takes `limit` (1..200) and `offset`, and that is all: its
+   * `RunListResponse` carries the rows and no total. So the caller can walk the
+   * history but can never say "50 of 137" — only "50, and the page came back
+   * full, so there are more". The viewer says exactly that rather than invent
+   * the total it was not given.
+   */
+  runs: (projectId: string, page: { limit: number; offset: number }) =>
+    request<{ runs: Run[] }>(
+      `/v1/projects/${projectId}/runs?limit=${page.limit}&offset=${page.offset}`,
+    ).then((r) => r.runs),
   run: (id: string) =>
     request<{ run?: Run } & Run>(`/v1/runs/${id}`).then((body) => body.run ?? body),
   createRun: (projectId: string, body: { objective: string; candidate_count: number }) =>

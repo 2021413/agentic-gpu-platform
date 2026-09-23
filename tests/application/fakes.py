@@ -31,7 +31,7 @@ from domain.entities.project import Project
 from domain.entities.review import Review, Severity
 from domain.entities.run import Run
 from domain.entities.worker import Worker
-from domain.enums import AgentRole, JobStatus, JobType, ReviewVerdict, RunStatus
+from domain.enums import AgentRole, JobType, ReviewVerdict
 from domain.events.base import DomainEvent
 from domain.exceptions import JobLeaseExpiredError, LLMTimeoutError, StructuredOutputError
 from domain.ports.repository_context import ContextRequest, FileExcerpt, RepositoryContext
@@ -145,12 +145,6 @@ class _RunRepo(_Repo[RunId, Run]):
     async def list_active(self) -> Sequence[Run]:
         return [r for r in self.items.values() if not r.status.is_terminal]
 
-    async def count_by_status(self) -> dict[RunStatus, int]:
-        counts: dict[RunStatus, int] = {}
-        for run in self.items.values():
-            counts[run.status] = counts.get(run.status, 0) + 1
-        return counts
-
 
 class _JobRepo(_Repo[JobId, Job]):
     async def find_by_idempotency_key(self, key: IdempotencyKey) -> Job | None:
@@ -158,14 +152,6 @@ class _JobRepo(_Repo[JobId, Job]):
 
     async def list_by_run(self, run_id: RunId) -> Sequence[Job]:
         return [j for j in self.items.values() if j.run_id == run_id]
-
-    async def list_by_status(self, status: JobStatus, *, limit: int = 100) -> Sequence[Job]:
-        return [j for j in self.items.values() if j.status is status][:limit]
-
-    async def list_expired_leases(self, *, now: datetime, limit: int = 100) -> Sequence[Job]:
-        return [j for j in self.items.values() if j.lease is not None and j.lease.is_expired(now)][
-            :limit
-        ]
 
 
 class _PlanRepo(_Repo[PlanId, Plan]):
@@ -193,10 +179,6 @@ class _ReviewRepo:
 
     async def list_by_candidate(self, candidate_id: CandidateId) -> Sequence[Review]:
         return [r for r in self.items if r.candidate_id == candidate_id]
-
-    async def latest_for_candidate(self, candidate_id: CandidateId) -> Review | None:
-        matches = await self.list_by_candidate(candidate_id)
-        return matches[-1] if matches else None
 
 
 class _ToolResultRepo:

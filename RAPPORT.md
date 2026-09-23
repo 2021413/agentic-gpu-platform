@@ -177,26 +177,50 @@ retire. La laisser telle quelle, c'est du code qui a l'air de marcher.
 
 ---
 
-## 9. Lectures de dépôt jamais utilisées
+## 9. Lectures de dépôt jamais utilisées — supprimées
 
-Ports déclarés, jamais appelés depuis `application/` ni `interfaces/` :
+Les quatre méthodes que la version précédente de cette section listait **sont
+retirées** : de leur déclaration dans `domain/ports/repositories.py`, de
+l'adaptateur SQLAlchemy et du double en mémoire des tests. Un port déclaré que
+personne n'appelle est une promesse que le code ne tient pas, et chaque
+implémentation la paie.
 
-| méthode | commentaire |
+| méthode retirée | pourquoi elle ne manquait à personne |
 |---|---|
-| `runs.count_by_status` | destinée à un tableau de bord qui n'existe pas |
-| `reviews.latest_for_candidate` | supplantée par `list_by_candidate` |
-| `jobs.list_by_status` | jamais nécessaire |
-| `jobs.list_expired_leases` | la file fait sa propre récupération |
-| `UnitOfWork.rollback` | appelée par le gestionnaire de contexte, pas par du code métier — faux positif du script |
+| `runs.count_by_status` | **vérifié** : `git log -S` la montre déclarée au tout premier commit de ports et jamais retouchée depuis ; aucune route n'agrège quoi que ce soit (`/health`, `/ready`, projets, runs, candidats, revues, workers, SSE), et la jauge `active_runs` de `telemetry/metrics.py` n'est alimentée par personne — aucun `.gauge(` dans `src/`. Le tableau de bord n'était pas en cours d'écriture : il n'a jamais été commencé. |
+| `reviews.latest_for_candidate` | **vérifié** : les trois lecteurs de revues (réparation du coder, contexte du reviewer, `ListReviewsUseCase`) veulent l'historique entier et appellent `list_by_candidate`, qui trie par itération. La dernière revue, c'est son dernier élément. |
+| `jobs.list_by_status` | **supposé** : aucun appelant, et aucun besoin visible — la file Redis est la source de vérité des jobs en attente ; une liste PostgreSQL par statut serait un outil de réconciliation, qui n'existe pas. |
+| `jobs.list_expired_leases` | **vérifié** : la récupération des baux passe entièrement par `MaintenanceLoop.tick`, qui interroge `queue.reclaim_expired`. Son docstring la disait « destinée au redémarrage » ; or le redémarrage ne l'appelait pas (`resume_active_runs` ne lit que `list_active`), et la file survit au redémarrage — `redis-server --appendonly yes` dans le compose. |
 
-Aucune n'est de la gravité de `tool_results.list_by_candidate`, qui était la
-preuve déterministe écrite en base et relue par personne. Mais la même
-mécanique les a trouvées, et elle vaut la peine d'être relancée après chaque
-ajout de port :
+Ce qui reste flaggé par le script, et le restera :
+
+| méthode gardée | pourquoi |
+|---|---|
+| `UnitOfWork.rollback` | Faux positif. Son seul appelant est `__aexit__`, qui vit dans l'adaptateur, pas dans un cas d'usage — le script ne regarde que `application/` et `interfaces/`. Une frontière transactionnelle qui ne sait que valider n'en est pas une : le rollback implicite sur exception *est* cette méthode. La raison est écrite dans son docstring, là où le prochain lecteur la trouvera. |
+
+Aucune de ces lectures n'était de la gravité de `tool_results.list_by_candidate`,
+qui était la preuve déterministe écrite en base et relue par personne. Mais la
+même mécanique les a trouvées, et elle vaut la peine d'être relancée après
+chaque ajout de port :
 
 ```bash
 ./scripts/unused-ports.sh
 ```
+
+**Vérifié** après la suppression : le script passe de « 22 port methods, 5 never
+called » à « 18 port methods, 1 never called », les 806 tests de la suite
+passent, `mypy` ne trouve rien et `ruff` est propre sur les fichiers touchés.
+
+Les tests qui couvraient les méthodes retirées étaient tous dans
+`tests/infrastructure/test_database_repositories.py`, et vérifiaient
+l'adaptateur SQLAlchemy, pas un comportement métier :
+`test_list_active_excludes_terminal_runs_and_counts_by_status` (renommé, sa
+moitié `list_active` reste), la ligne `list_by_status` de
+`test_job_round_trip_and_listings`, `test_reviews_are_listed_in_iteration_order`
+(les assertions sur la dernière revue passent maintenant par `listed[-1]`, donc
+la couverture du mapper est conservée) et
+`test_list_expired_leases_returns_only_stuck_in_flight_jobs`, supprimé : il
+n'existait que pour exercer la méthode retirée.
 
 ---
 

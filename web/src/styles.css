@@ -347,6 +347,24 @@ input:focus, select:focus {
 
 .new-run { margin-bottom: var(--s3); }
 
+/* The list above is one page of a longer history and the endpoint reports no
+   total, so this is the only way to find out what is below it. It sits outside
+   the scroller, full width and quiet: it states what the next request will ask
+   for, it is not a state worth reacting to, and once a short page comes back it
+   disappears and the header count drops its plus. */
+.more {
+  display: block;
+  width: 100%;
+  margin-top: var(--s2);
+  padding: 7px 8px;
+  background: none;
+  border-color: var(--line-soft);
+  color: var(--text-dim);
+  font: 500 11px/1 var(--mono);
+  letter-spacing: 0.04em;
+}
+.more:hover:not(:disabled) { background: var(--raised); color: var(--text); border-color: var(--line); }
+
 /* ── notices ─────────────────────────────────────────────────────────── */
 .error {
   margin: var(--s3) var(--s5) 0;
