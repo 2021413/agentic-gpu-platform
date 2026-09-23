@@ -52,7 +52,9 @@ class ProjectView:
     A project runs these commands against the caller's code. They were stored
     and executed but never shown, so there was no way to answer "what is this
     about to run", nor to notice that a project created earlier kept commands
-    that have since changed — a project's toolchain is fixed at creation.
+    that have since changed. Answering the first question is also what makes
+    the answer to the second actionable, now that ``PUT
+    /v1/projects/{id}/toolchain`` can correct them.
     """
 
     @classmethod

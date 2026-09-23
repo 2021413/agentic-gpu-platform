@@ -19,11 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from domain.entities.candidate import Candidate
 from domain.entities.job import Job
 from domain.entities.plan import Plan
-from domain.entities.project import Project
+from domain.entities.project import Project, ToolchainConfig
 from domain.entities.review import Review
 from domain.entities.run import Run
 from domain.enums import FailureKind, JobStatus, JobType, ReviewVerdict, RunStatus
 from domain.events.worker import WorkerRegistered
+from domain.exceptions import EntityNotFoundError
 from domain.value_objects.identifiers import CandidateId, IdempotencyKey, RunId, WorkerId
 from domain.value_objects.llm import TokenUsage
 from domain.value_objects.patch import Patch
@@ -66,6 +67,50 @@ async def test_project_is_readable_by_id_and_by_name(
         assert by_name.toolchain == project.toolchain
         assert await uow.projects.get_by_name("absent") is None
         assert list(await uow.projects.list_all()) == [project]
+
+
+async def test_correcting_a_toolchain_rewrites_one_column_of_the_same_row(
+    session_factory: Factory, project: Project
+) -> None:
+    """The toolchain already has a column, so correcting it needs no migration.
+
+    Checked against the server because that is the only thing that can prove
+    the JSON column really took the new commands, and that the identity the
+    project's runs were performed against — its path, branch, name and
+    creation time — was left exactly as it was.
+    """
+    async with unit(session_factory) as uow:
+        await uow.projects.add(project)
+        await uow.commit()
+
+    async with unit(session_factory) as uow:
+        stored = await uow.projects.get(project.id)
+        assert stored is not None
+        stored.replace_toolchain(ToolchainConfig(language="rust", test_command="cargo test"))
+        await uow.projects.update_toolchain(stored)
+        await uow.commit()
+
+    async with unit(session_factory) as uow:
+        reread = await uow.projects.get(project.id)
+        assert reread is not None
+        assert reread.toolchain.test_command == "cargo test"
+        assert reread.toolchain.build_command is None
+        assert reread.toolchain.language == "rust"
+        assert reread.name == project.name
+        assert reread.repository_url == project.repository_url
+        assert reread.local_path == project.local_path
+        assert reread.default_branch == project.default_branch
+        assert reread.created_at == project.created_at
+        # One row, not a second project silently inserted beside the first.
+        assert len(await uow.projects.list_all()) == 1
+
+
+async def test_correcting_the_toolchain_of_an_absent_project_is_refused(
+    session_factory: Factory, project: Project
+) -> None:
+    async with unit(session_factory) as uow:
+        with pytest.raises(EntityNotFoundError):
+            await uow.projects.update_toolchain(project)
 
 
 # ---------------------------------------------------------------------------

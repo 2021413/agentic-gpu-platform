@@ -98,6 +98,7 @@ STATUS_BY_CODE: Final[Mapping[str, int]] = {
     # will keep failing until the resource moves — that is exactly "conflict".
     "invalid_state_transition": 409,
     "run_not_modifiable": 409,
+    "project_not_modifiable": 409,
     "run_cancelled": 409,
     "job_lease_expired": 409,
     "job_not_retryable": 409,
@@ -137,6 +138,7 @@ _TITLES: Final[Mapping[str, str]] = {
     "not_found": "Resource not found",
     "invalid_state_transition": "Invalid state transition",
     "run_not_modifiable": "Run is no longer modifiable",
+    "project_not_modifiable": "Project is in use by a run",
     "run_cancelled": "Run has been cancelled",
     "job_lease_expired": "Job lease expired",
     "job_not_retryable": "Job cannot be retried",

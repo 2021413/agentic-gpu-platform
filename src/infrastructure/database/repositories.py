@@ -42,6 +42,7 @@ from infrastructure.database.event_codec import event_run_id, load_event
 from infrastructure.database.mappers import (
     apply_candidate,
     apply_job,
+    apply_project_toolchain,
     apply_run,
     apply_worker,
     candidate_to_domain,
@@ -119,6 +120,18 @@ class SqlAlchemyProjectRepository(_Repository):
     async def get_by_name(self, name: str) -> Project | None:
         model = await self._session.scalar(select(ProjectModel).where(ProjectModel.name == name))
         return project_to_domain(model) if model else None
+
+    async def update_toolchain(self, project: Project) -> None:
+        """Re-read the row in this session, then write only the toolchain.
+
+        Re-reading rather than merging the aggregate is what the run repository
+        does, for the same reason: the row this transaction saw is the one it
+        is allowed to overwrite.
+        """
+        model = await self._session.get(ProjectModel, project.id.value)
+        if model is None:
+            raise EntityNotFoundError("Project", project.id)
+        apply_project_toolchain(model, project)
 
     async def list_all(self, *, limit: int = 100, offset: int = 0) -> Sequence[Project]:
         statement = (

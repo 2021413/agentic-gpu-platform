@@ -30,6 +30,7 @@ from application.use_cases.projects import (
     CreateProjectUseCase,
     GetProjectUseCase,
     ListProjectsUseCase,
+    ReplaceProjectToolchainUseCase,
 )
 from application.use_cases.runs import (
     CancelRunUseCase,
@@ -124,6 +125,7 @@ def harness() -> Harness:
         create_project=CreateProjectUseCase(uow_factory=uow_factory, clock=clock, ids=ids),
         get_project=GetProjectUseCase(uow_factory=uow_factory),
         list_projects=ListProjectsUseCase(uow_factory=uow_factory),
+        replace_project_toolchain=ReplaceProjectToolchainUseCase(uow_factory=uow_factory),
         create_run=CreateRunUseCase(
             uow_factory=uow_factory,
             bus=bus,

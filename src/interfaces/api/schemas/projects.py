@@ -26,6 +26,12 @@ class ToolchainPayload(BaseModel):
 
     Commands are configured, never guessed: inferring a build command and then
     reporting its failure as a code defect would poison the repair loop.
+
+    Also the body of ``PUT /v1/projects/{id}/toolchain``, unchanged. Replacing
+    the toolchain sends exactly what creating it sent, so the two paths cannot
+    drift into accepting different commands, and ``extra="forbid"`` makes the
+    fields this route refuses to touch — ``name``, ``local_path``,
+    ``default_branch`` — a 422 rather than a silently dropped key.
     """
 
     model_config = ConfigDict(extra="forbid")

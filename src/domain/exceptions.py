@@ -6,11 +6,12 @@ documents happens exclusively in ``interfaces.api.errors``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from domain.enums import JobStatus, RunStatus
-    from domain.value_objects.identifiers import JobId, RunId, WorkerId
+    from domain.value_objects.identifiers import JobId, ProjectId, RunId, WorkerId
 
 __all__ = [
     "CandidateError",
@@ -25,6 +26,7 @@ __all__ = [
     "NoCompatibleWorkerError",
     "OutputTruncatedError",
     "PlanValidationError",
+    "ProjectNotModifiableError",
     "RunCancelledError",
     "StructuredOutputError",
     "ToolExecutionError",
@@ -277,6 +279,29 @@ class JobNotRetryableError(DomainError):
             status=str(status),
             attempt=attempt,
         )
+
+
+class ProjectNotModifiableError(DomainError):
+    """A project was asked to change while its runs are still using it.
+
+    A run reads the toolchain every time it validates a candidate, so replacing
+    the commands under a live run would let one run judge its own candidates by
+    two different definitions of "passing" — and the losing candidates would
+    have been discarded for failing a check the winners never faced. The
+    refusal names the runs to wait for (or cancel), because the caller cannot
+    act on "later".
+    """
+
+    code = "project_not_modifiable"
+
+    def __init__(self, project_id: ProjectId, active_run_ids: Sequence[RunId]) -> None:
+        super().__init__(
+            "project cannot be modified while runs are in flight",
+            project_id=str(project_id),
+            active_run_ids=[str(run_id) for run_id in active_run_ids],
+        )
+        self.project_id = project_id
+        self.active_run_ids = tuple(active_run_ids)
 
 
 class RunNotModifiableError(DomainError):

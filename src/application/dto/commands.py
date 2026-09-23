@@ -30,6 +30,7 @@ __all__ = [
     "DrainWorkerCommand",
     "HeartbeatCommand",
     "RegisterWorkerCommand",
+    "ReplaceProjectToolchainCommand",
     "ReportJobFailureCommand",
     "ReportJobResultCommand",
 ]
@@ -43,6 +44,20 @@ class CreateProjectCommand:
     default_branch: str = "main"
     toolchain: ToolchainConfig | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaceProjectToolchainCommand:
+    """Correct the commands a project runs.
+
+    A whole ``ToolchainConfig``, never a handful of fields to merge: the
+    commands are read together when a candidate is validated, and a partial
+    update cannot tell "leave the test command alone" apart from "there is no
+    test command" without inventing a sentinel for absence.
+    """
+
+    project_id: ProjectId
+    toolchain: ToolchainConfig
 
 
 @dataclass(frozen=True, slots=True)

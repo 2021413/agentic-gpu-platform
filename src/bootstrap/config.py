@@ -21,6 +21,7 @@ from domain.enums import AgentRole
 from domain.value_objects.limits import RunLimits
 
 __all__ = [
+    "PUBLISHED_DEV_SERVICE_TOKEN",
     "ApiSettings",
     "LLMProviderKind",
     "Settings",
@@ -28,6 +29,17 @@ __all__ = [
     "get_api_settings",
     "get_settings",
 ]
+
+
+PUBLISHED_DEV_SERVICE_TOKEN = "dev-service-token-change-me"
+"""The SERVICE_TOKEN default that ``docker-compose.yml`` and ``.env.example`` set.
+
+It lives here as a name rather than inside the validator because it is not a
+magic string: it is the same contract with those two committed files that the
+module docstring describes, and the day the compose default changes, this is
+the one place that has to follow. The validator below refuses it in production,
+and the tests assert against this name instead of retyping the secret.
+"""
 
 
 @unique
@@ -207,6 +219,19 @@ class Settings(BaseSettings):
             )
         if self.environment.is_production and not self.service_token.get_secret_value():
             raise ValueError("SERVICE_TOKEN is required outside local development")
+        if (
+            self.environment.is_production
+            and self.service_token.get_secret_value() == PUBLISHED_DEV_SERVICE_TOKEN
+        ):
+            # A non-empty token passed the check above, which is why this needs its
+            # own branch: the compose default is committed to this repository, so a
+            # deployment that forgets to change it is guarded by a secret anyone can
+            # read. Local development keeps it on purpose, hence the environment test.
+            raise ValueError(
+                "SERVICE_TOKEN is still the published default value from "
+                "docker-compose.yml, which is committed to this repository and so "
+                "known to anyone who can read it; set a real secret in production"
+            )
         if self.environment.is_production and self.llm_provider is LLMProviderKind.FAKE:
             raise ValueError("the fake inference provider must never run in production")
         return self

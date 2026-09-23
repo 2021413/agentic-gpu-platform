@@ -50,6 +50,16 @@ class ProjectRepository(Protocol):
     async def get_by_name(self, name: str) -> Project | None: ...
     async def list_all(self, *, limit: int = 100, offset: int = 0) -> Sequence[Project]: ...
 
+    async def update_toolchain(self, project: Project) -> None:
+        """Persist the project's commands, and nothing else about it.
+
+        Deliberately narrower than the ``update`` the other repositories
+        expose: a project's source and branch are the identity its run history
+        hangs on, and a general ``update`` would make overwriting them a typo
+        away. What cannot be written cannot be written by accident.
+        """
+        ...
+
 
 @runtime_checkable
 class RunRepository(Protocol):

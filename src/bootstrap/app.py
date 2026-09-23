@@ -36,6 +36,7 @@ def _dependencies(container: Container) -> ApiDependencies:
         create_project=container.create_project,
         get_project=container.get_project,
         list_projects=container.list_projects,
+        replace_project_toolchain=container.replace_project_toolchain,
         create_run=container.create_run,
         get_run=container.get_run,
         cancel_run=container.cancel_run,

@@ -150,10 +150,10 @@ pid=$(curl -fsS -X POST "$API/v1/projects" -H 'content-type: application/json' \
   | $PY -c 'import json,sys; print(json.load(sys.stdin)["id"])') \
   || die "could not create the project; is the control plane running? (make docker-up)"
 
-# A project's toolchain is fixed when it is created: there is no update route,
-# and creating one that already exists returns the existing record unchanged.
-# So a second run with different commands silently used the first run's — which
-# is how a run was spent executing `pytest` after the caller had replaced it.
+# Creating a project that already exists returns the existing record, commands
+# and all, so a second run with different commands would silently use the first
+# run's — which is how a run was spent executing `pytest` after the caller had
+# replaced it. Compare, then correct it through the API.
 read_toolchain() {
     curl -fsS "$API/v1/projects/$1" | $PY -c '
 import json, sys
@@ -162,15 +162,24 @@ print(t.get("build_command") or "")
 print(t.get("test_command") or "")
 '
 }
-stored_build=$(read_toolchain "$pid" | sed -n 1p)
-stored_test=$(read_toolchain "$pid" | sed -n 2p)
+stored=$(read_toolchain "$pid")
+stored_build=$(printf '%s\n' "$stored" | sed -n 1p)
+stored_test=$(printf '%s\n' "$stored" | sed -n 2p)
 
 if [ "$stored_build" != "$build" ] || [ "$stored_test" != "$test" ]; then
     printf '\n==> the project %s already exists, with different commands:\n' "$name"
     printf '    stored : build=%s | test=%s\n' "${stored_build:-none}" "${stored_test:-none}"
-    printf '    wanted : build=%s | test=%s\n\n' "${build:-none}" "${test:-none}"
-    die "a project's toolchain cannot be changed after creation.
-       Run it under a different project name:
+    printf '    wanted : build=%s | test=%s\n' "${build:-none}" "${test:-none}"
+    printf '==> correcting its toolchain\n\n'
+    curl -fsS -X PUT "$API/v1/projects/$pid/toolchain" -H 'content-type: application/json' \
+      -d "{\"language\":\"$lang\",
+           \"build_command\":$(json_or_null "$build"),
+           \"test_command\":$(json_or_null "$test")}" >/dev/null \
+      || die "the control plane refused to change this project's toolchain.
+       It refuses while a run of the project is still in flight: a run reads
+       these commands every time it validates a candidate, and changing them
+       under it would judge its candidates by two different rules. Wait for
+       that run, cancel it, or use another project name:
            NAME=$name-2 ./run-on.sh \"$project_path\" \"$objective\""
 fi
 
