@@ -378,6 +378,29 @@ compter cela comme un signal distinct de « les tests échouent » — un module
 ne s'importe plus n'est pas un test rouge, c'est un fichier cassé, et le coder
 gagnerait à ce qu'on le lui dise dans ces termes.
 
+## 14. Cinq jauges déclarées, aucune alimentée
+
+Trouvé en retirant les ports morts du point 9, et c'est la même promesse non
+tenue une couche au-dessus.
+
+`PlatformMetrics` (`src/infrastructure/telemetry/metrics.py`) déclare
+`active_runs`, `queued_jobs`, `active_jobs`, `registered_workers` et
+`healthy_workers`. **Aucun appel `.gauge(` n'existe nulle part dans `src/`** —
+vérifié par grep, zéro occurrence. Les compteurs et histogrammes, eux, sont
+bien alimentés ; seules les jauges ne le sont pas.
+
+Ce qui rend le point sérieux plutôt que cosmétique : une jauge Prometheus non
+alimentée n'est pas absente du scrape, elle vaut **zéro**. Un tableau de bord
+branché dessus affiche donc « 0 run actif, 0 worker enregistré » avec la même
+assurance qu'un vrai relevé. C'est exactement le genre de chiffre rassurant et
+faux que ce projet passe son temps à refuser ailleurs.
+
+Le détecteur de ports ne le verra jamais : ce ne sont pas des méthodes de port.
+Soit on les alimente depuis la boucle de maintenance, qui connaît déjà ces
+cinq nombres, soit on les retire.
+
+---
+
 ## Ce qui a été vérifié et fonctionne
 
 Pour l'équilibre, et parce que ces points ne doivent pas être re-testés à
@@ -395,7 +418,8 @@ chaque doute :
   ce format cesse de tenir** ;
 - **la clé d'inférence** arrive jusqu'à l'adaptateur (ce ne fut pas toujours
   le cas : elle était câblée dans le code et absente du compose) ;
-- **753 tests**, ruff et mypy propres.
+- **806 tests** côté control plane et **380** côté worker, ruff et mypy propres
+  des deux côtés.
 
 ---
 
